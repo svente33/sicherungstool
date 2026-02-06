@@ -262,6 +262,37 @@ class ITNSicherungPlugin {
 
     public function cron_run_backup() {
         error_log('ITN Cron: Starte geplantes Backup');
+        
+        // Prefer CLI-Runner if available (bypasses web server timeouts)
+        $cli_runner_path = ITN_PLUGIN_DIR . 'cli-backup-runner.php';
+        if (file_exists($cli_runner_path) && function_exists('exec')) {
+            // Check if exec is enabled
+            $disabled = ini_get('disable_functions');
+            $exec_disabled = $disabled && in_array('exec', array_map('trim', explode(',', $disabled)), true);
+            
+            if (!$exec_disabled) {
+                // Use CLI runner
+                $timestamp = current_time('timestamp');
+                $siteHost = ITN_Helpers::esc_filename(parse_url(home_url(), PHP_URL_HOST));
+                $run_id = 'backup_' . date('Ymd_His', $timestamp) . '_' . $siteHost;
+                
+                $php_bin = defined('PHP_BINARY') ? PHP_BINARY : 'php';
+                $cmd = escapeshellcmd($php_bin) . ' ' . escapeshellarg($cli_runner_path) . ' ' . escapeshellarg($run_id) . ' > /dev/null 2>&1 &';
+                
+                error_log('ITN Cron: Starte CLI-Runner: ' . $cmd);
+                @exec($cmd);
+                
+                error_log('ITN Cron: CLI-Runner gestartet mit Run-ID: ' . $run_id);
+                
+                // Schedule next monthly if needed
+                if (class_exists('ITN_Schedule')) ITN_Schedule::maybe_schedule_next_monthly();
+                
+                return;
+            }
+        }
+        
+        // Fallback: Run in-process (may hit timeouts)
+        error_log('ITN Cron: CLI-Runner nicht verfügbar, führe Backup direkt aus (kann Timeout haben)');
         $opts = array_merge(itn_settings_defaults(), get_option('itn_settings', []));
         $backup = new ITN_Backup($opts);
         $result = $backup->run(null);

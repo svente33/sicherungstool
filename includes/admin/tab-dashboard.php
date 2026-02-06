@@ -130,7 +130,34 @@ $issues = itn_collect_environment_issues();
                         <?php endif; ?>
                         <tr>
                             <th><?php _e('Verschlüsselung', 'itn-sicherung'); ?></th>
-                            <td><?php echo !empty($report['encrypted']) ? '<span class="dashicons dashicons-lock"></span> ' . __('Ja (AES-256)', 'itn-sicherung') : '<span class="dashicons dashicons-unlock"></span> ' . __('Nein', 'itn-sicherung'); ?></td>
+                            <td>
+                                <?php 
+                                if (!empty($report['encrypted'])) {
+                                    echo '<span class="dashicons dashicons-lock" style="color: #00a32a;"></span> ';
+                                    $method = $report['encryption_method'] ?? 'unknown';
+                                    switch ($method) {
+                                        case 'ziparchive':
+                                            echo __('Ja (ZipArchive AES-256)', 'itn-sicherung');
+                                            break;
+                                        case '7z-aes256':
+                                            echo __('Ja (7z AES-256)', 'itn-sicherung');
+                                            break;
+                                        case 'zip-pkware':
+                                            echo __('Ja (Zip PKWARE)', 'itn-sicherung');
+                                            break;
+                                        default:
+                                            echo __('Ja (AES-256)', 'itn-sicherung');
+                                    }
+                                    
+                                    // Show warning if present
+                                    if (!empty($report['encryption_warning'])) {
+                                        echo '<br><span style="color: #d63638; font-size: 0.9em;">⚠️ ' . esc_html($report['encryption_warning']) . '</span>';
+                                    }
+                                } else {
+                                    echo '<span class="dashicons dashicons-unlock" style="color: #d63638;"></span> ' . __('Nein', 'itn-sicherung');
+                                }
+                                ?>
+                            </td>
                         </tr>
                         <?php if (is_array(($report['cloud'] ?? null))): ?>
                         <tr>
