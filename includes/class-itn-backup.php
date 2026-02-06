@@ -16,6 +16,7 @@ class ITN_Backup {
 
     protected $zip_encrypt_enabled = false;
     protected $zip_password = '';
+    protected $encryption_method = 'none'; // Tracks actual encryption method used
 
     public function __construct($opts = []) {
         $this->opts = $opts;
@@ -23,10 +24,16 @@ class ITN_Backup {
         ITN_Helpers::ensure_dir($this->backup_dir);
         if (function_exists('itn_protect_backup_dir')) itn_protect_backup_dir($this->backup_dir);
 
+        // Validate encryption settings
         $this->zip_encrypt_enabled = !empty($opts['zip_encrypt_enabled']);
         $this->zip_password = isset($opts['zip_encrypt_password']) ? (string)$opts['zip_encrypt_password'] : '';
-        if ($this->zip_encrypt_enabled && $this->zip_password === '') {
-            $this->zip_encrypt_enabled = false;
+        
+        // Password validation: Must be at least 12 characters if encryption is enabled
+        if ($this->zip_encrypt_enabled) {
+            if ($this->zip_password === '' || strlen($this->zip_password) < 12) {
+                error_log('ITN Backup: Verschlüsselung aktiviert, aber Passwort zu kurz (min. 12 Zeichen)');
+                $this->zip_encrypt_enabled = false;
+            }
         }
     }
 
@@ -60,8 +67,8 @@ class ITN_Backup {
 
     protected function repack_zip_with_encryption($zip_path, $password) {
         if (!self::can_exec()) {
-            $this->progress(95, 'Verschlüsselung nicht möglich: exec deaktiviert');
-            return ['success' => false, 'message' => 'exec disabled'];
+            $this->progress(95, '⚠️ Verschlüsselung nicht möglich: exec/shell_exec deaktiviert');
+            return ['success' => false, 'message' => 'exec/shell_exec deaktiviert'];
         }
         $bin7z  = self::find_bin(['7z','7za','7zz']);
         $binzip = self::find_bin(['zip']);
@@ -75,7 +82,7 @@ class ITN_Backup {
         $z->close();
 
         $enc_path = $zip_path . '.enc';
-        $ok = false; $method = '';
+        $ok = false; $method = ''; $method_key = '';
 
         if ($bin7z) {
             $cmd = 'cd ' . escapeshellarg($tmp) . ' && ' .
@@ -84,6 +91,7 @@ class ITN_Backup {
             @exec($cmd, $out, $ret);
             $ok = ($ret === 0 && file_exists($enc_path) && filesize($enc_path) > 0);
             $method = 'AES-256 (7z)';
+            $method_key = '7z-aes256';
         } elseif ($binzip) {
             $cmd = 'cd ' . escapeshellarg($tmp) . ' && ' .
                    escapeshellcmd($binzip) . ' -rq -P ' . escapeshellarg($password) . ' ' .
@@ -91,8 +99,11 @@ class ITN_Backup {
             @exec($cmd, $out, $ret);
             $ok = ($ret === 0 && file_exists($enc_path) && filesize($enc_path) > 0);
             $method = 'PKWARE/ZipCrypto (zip)';
+            $method_key = 'zip-pkware';
         } else {
-            $this->progress(95, 'Keine CLI für Verschlüsselung gefunden (7z/zip)');
+            $this->progress(95, '⚠️ Keine CLI für Verschlüsselung gefunden (7z/zip)');
+            ITN_Helpers::rrmdir($tmp);
+            return ['success'=>false,'message'=>'7z und zip nicht verfügbar'];
         }
 
         ITN_Helpers::rrmdir($tmp);
@@ -101,7 +112,7 @@ class ITN_Backup {
             @unlink($zip_path);
             @rename($enc_path, $zip_path);
             $this->progress(96, 'ZIP neu verpackt mit Passwort — ' . $method);
-            return ['success'=>true,'method'=>$method];
+            return ['success'=>true,'method'=>$method,'method_key'=>$method_key];
         } else {
             @unlink($enc_path);
             return ['success'=>false,'message'=>'CLI-Repack fehlgeschlagen'];
@@ -160,7 +171,8 @@ class ITN_Backup {
                 'upload_url_path_option' => get_option('upload_url_path', ''),
                 'is_multisite' => function_exists('is_multisite') ? (bool) is_multisite() : false,
                 'network' => [],
-                'zip_encrypted' => (bool)$this->zip_encrypt_enabled,
+                'encrypted' => (bool)$this->zip_encrypt_enabled,
+                'encryption_method' => 'none', // Will be updated after encryption
             ];
             if (!empty($meta['is_multisite']) && isset($wpdb)) {
                 $site_table = $wpdb->base_prefix . 'site';
@@ -291,21 +303,42 @@ class ITN_Backup {
 
             $this->progress(94, 'ZIP erfolgreich erstellt (' . ITN_Helpers::format_bytes($zip_size) . ')');
 
-            // Rest bleibt gleich...
+            // Encryption handling
+            $encryption_warning = '';
             if ($this->zip_encrypt_enabled) {
-                $supports = method_exists($z, 'setEncryptionName') || method_exists($z, 'setEncryptionIndex');
-                if (!$supports) {
-                    $this->progress(94, 'Verschlüsselung via ZipArchive nicht verfügbar – versuche CLI');
-                    $re = $this->repack_zip_with_encryption($this->zip_path, $this->zip_password);
-                    if (!$re['success']) {
-                        $this->progress(95, 'Hinweis: ZIP unverschlüsselt (' . ($re['message'] ?? 'CLI nicht verfügbar') . ')');
-                    } else {
-                        $this->progress(96, 'ZIP verschlüsselt (CLI) — ' . ($re['method'] ?? ''));
-                    }
+                // First try: ZipArchive native encryption (preferred method)
+                $supports_encryption = method_exists($z, 'setEncryptionName') || method_exists($z, 'setEncryptionIndex');
+                if ($supports_encryption) {
+                    $this->progress(95, 'ZIP mit Passwort erstellt (ZipArchive AES-256)');
+                    $this->encryption_method = 'ziparchive';
+                    error_log('ITN Encryption: ZipArchive AES-256 verwendet');
                 } else {
-                    $this->progress(95, 'ZIP mit Passwort erstellt (ZipArchive)');
+                    // Fallback: CLI repack with 7z or zip
+                    $this->progress(94, 'ZipArchive unterstützt keine Verschlüsselung – versuche CLI-Fallback (7z/zip)');
+                    error_log('ITN Encryption: ZipArchive unterstützt keine Verschlüsselung, versuche CLI...');
+                    
+                    $re = $this->repack_zip_with_encryption($this->zip_path, $this->zip_password);
+                    if ($re['success']) {
+                        $this->progress(96, 'ZIP verschlüsselt (CLI) — ' . ($re['method'] ?? ''));
+                        $this->encryption_method = $re['method_key'] ?? 'cli';
+                        error_log('ITN Encryption: CLI erfolgreich - ' . ($re['method'] ?? ''));
+                    } else {
+                        // Encryption failed completely
+                        $error_msg = $re['message'] ?? 'Unbekannt';
+                        $this->progress(95, '⚠️ WARNUNG: ZIP konnte NICHT verschlüsselt werden (' . $error_msg . ')');
+                        $encryption_warning = 'Verschlüsselung fehlgeschlagen: ' . $error_msg;
+                        $this->encryption_method = 'none';
+                        error_log('ITN Encryption ERROR: Alle Methoden fehlgeschlagen - ' . $error_msg);
+                    }
                 }
+            } else {
+                $this->encryption_method = 'none';
             }
+
+            // Update metadata with encryption info
+            $meta['encrypted'] = ($this->encryption_method !== 'none');
+            $meta['encryption_method'] = $this->encryption_method;
+            file_put_contents($this->meta_path, wp_json_encode($meta, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
 
             $this->progress(95, 'Erstelle Installer-Datei');
             $installer_target = $this->backup_dir . '/installer-' . basename($this->zip_path, '.zip') . '.php';
@@ -361,7 +394,13 @@ class ITN_Backup {
                 $cloud_msgs[] = $msg;
             }
 
-            $msg = 'Backup erstellt' . ($this->zip_encrypt_enabled ? ' (ZIP verschlüsselt)' : '');
+            $msg = 'Backup erstellt';
+            if ($this->encryption_method !== 'none') {
+                $msg .= ' (verschlüsselt: ' . $this->encryption_method . ')';
+            }
+            if ($encryption_warning) {
+                $msg .= ' [' . $encryption_warning . ']';
+            }
             if (!empty($cloud_msgs)) $msg .= ' — ' . implode(' | ', $cloud_msgs);
 
             $res = ['success' => true, 'message' => $msg, 'zip' => $this->zip_path];
@@ -372,7 +411,9 @@ class ITN_Backup {
                 'message'    => $msg,
                 'zip'        => $this->zip_path,
                 'zip_size'   => $zip_size,
-                'encrypted'  => (bool)$this->zip_encrypt_enabled,
+                'encrypted'  => ($this->encryption_method !== 'none'),
+                'encryption_method' => $this->encryption_method,
+                'encryption_warning' => $encryption_warning,
                 'cloud'      => $cloud_status,
                 'created_at' => time(),
             ];
@@ -404,7 +445,8 @@ class ITN_Backup {
                 'message'    => $e->getMessage(),
                 'zip'        => $this->zip_path ?? '',
                 'zip_size'   => ($this->zip_path && file_exists($this->zip_path)) ? @filesize($this->zip_path) : 0,
-                'encrypted'  => (bool)$this->zip_encrypt_enabled,
+                'encrypted'  => ($this->encryption_method !== 'none'),
+                'encryption_method' => $this->encryption_method,
                 'cloud'      => ['s3'=>null,'azure'=>null,'onedrive'=>null],
                 'created_at' => time(),
             ];

@@ -710,8 +710,27 @@ class ITNSicherungPlugin {
         $new['notify_email'] = sanitize_email($_POST['notify_email'] ?? '');
         $new['zip_encrypt_enabled']  = isset($_POST['zip_encrypt_enabled']);
         $posted_zip_pw = isset($_POST['zip_encrypt_password']) ? trim((string)$_POST['zip_encrypt_password']) : '';
-        if ($posted_zip_pw !== '') {
-            $new['zip_encrypt_password'] = $posted_zip_pw;
+        
+        // Password validation: minimum 12 characters when encryption is enabled
+        if ($new['zip_encrypt_enabled']) {
+            if ($posted_zip_pw === '' || strlen($posted_zip_pw) < 12) {
+                // Keep old password if exists, otherwise disable encryption
+                if (isset($old['zip_encrypt_password']) && strlen($old['zip_encrypt_password']) >= 12) {
+                    // Keep existing password
+                } else {
+                    // Disable encryption and show warning
+                    $new['zip_encrypt_enabled'] = false;
+                    wp_redirect(add_query_arg(['page' => 'itn-sicherung', 'tab' => 'settings', 'itn_notice'=>'error', 'itn_msg'=>urlencode('Verschlüsselung deaktiviert: Passwort muss mindestens 12 Zeichen lang sein.')], admin_url('admin.php')));
+                    exit;
+                }
+            } else {
+                $new['zip_encrypt_password'] = $posted_zip_pw;
+            }
+        } elseif ($posted_zip_pw !== '') {
+            // User provided a password but didn't enable encryption - still save it
+            if (strlen($posted_zip_pw) >= 12) {
+                $new['zip_encrypt_password'] = $posted_zip_pw;
+            }
         }
         $new['restore_drop_db'] = isset($_POST['restore_drop_db']);
         $new['s3_enabled']    = isset($_POST['s3_enabled']);

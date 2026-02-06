@@ -6,21 +6,31 @@ class ITN_Schedule {
         $opts = get_option('itn_settings', []);
         $custom_minutes = max(5, intval($opts['custom_interval_minutes'] ?? 60));
         
+        // Custom interval
         $schedules['itn_custom'] = [
             'interval' => $custom_minutes * 60,
             'display'  => 'ITN Sicherung benutzerdefiniert (' . $custom_minutes . ' Min)',
         ];
         
+        // Weekly interval
         $schedules['itn_weekly'] = [
             'interval' => 7 * DAY_IN_SECONDS,
             'display'  => 'ITN Sicherung wöchentlich',
         ];
         
+        // Twice daily interval (if not already defined by WordPress)
+        if (!isset($schedules['itn_twicedaily'])) {
+            $schedules['itn_twicedaily'] = [
+                'interval' => 12 * HOUR_IN_SECONDS,
+                'display'  => 'ITN Sicherung zweimal täglich',
+            ];
+        }
+        
         return $schedules;
     }
 
     public static function ensure_cron() {
-        // Registriere Custom Schedules
+        // Registriere Custom Schedules - WICHTIG: muss vor wp_schedule_event aufgerufen werden
         add_filter('cron_schedules', [__CLASS__, 'register_schedules']);
 
         $opts = get_option('itn_settings', []);
@@ -31,7 +41,7 @@ class ITN_Schedule {
         $hour = intval($parts[0] ?? 2);
         $min = intval($parts[1] ?? 0);
 
-        // Lösche alle bestehenden Crons
+        // Lösche alle bestehenden Crons (inkl. Duplikate)
         self::clear_cron();
 
         $now = current_time('timestamp');
@@ -51,7 +61,8 @@ class ITN_Schedule {
             error_log('ITN Schedule: Hourly Cron geplant für ' . date('Y-m-d H:i:s', $next) . ' - Result: ' . ($scheduled ? 'OK' : 'FAILED'));
             
         } elseif ($freq === 'twicedaily') {
-            $next = $now + 43200; // 12 Stunden
+            $next = $now + 60; // Start in 1 minute
+            // Use our custom interval to ensure it's registered
             $scheduled = wp_schedule_event($next, 'twicedaily', 'itn/run_backup_cron');
             error_log('ITN Schedule: Twice Daily Cron geplant für ' . date('Y-m-d H:i:s', $next) . ' - Result: ' . ($scheduled ? 'OK' : 'FAILED'));
             
@@ -152,17 +163,28 @@ class ITN_Schedule {
     }
 
     public static function clear_cron() {
-        $next = wp_next_scheduled('itn/run_backup_cron');
         $cleared_count = 0;
+        $max_iterations = 50; // Prevent infinite loops
+        $iterations = 0;
         
-        while ($next) {
+        // Clear all scheduled events for our hook (including duplicates)
+        while ($iterations < $max_iterations) {
+            $next = wp_next_scheduled('itn/run_backup_cron');
+            if (!$next) {
+                break; // No more events found
+            }
+            
             wp_unschedule_event($next, 'itn/run_backup_cron');
             $cleared_count++;
-            $next = wp_next_scheduled('itn/run_backup_cron');
+            $iterations++;
         }
         
         if ($cleared_count > 0) {
-            error_log('ITN Schedule: ' . $cleared_count . ' alte Crons gelöscht');
+            error_log('ITN Schedule: ' . $cleared_count . ' alte Cron-Events gelöscht');
+        }
+        
+        if ($iterations >= $max_iterations) {
+            error_log('ITN Schedule WARNING: Max iterations erreicht beim Löschen von Crons');
         }
         
         delete_option('itn_monthly_next_ts');
