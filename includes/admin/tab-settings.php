@@ -51,10 +51,32 @@ $opts = array_merge(itn_settings_defaults(), get_option('itn_settings', []));
             
             <?php
             // Prüfe ob WP-Cron deaktiviert ist
-            if (defined('DISABLE_WP_CRON') && DISABLE_WP_CRON) {
-                echo '<div class="notice notice-warning inline"><p><strong>⚠️ WP-Cron ist deaktiviert!</strong><br>';
-                echo 'Für automatische Backups muss ein Server-Cron eingerichtet werden.<br>';
-                echo 'Füge in crontab hinzu: <code>*/15 * * * * wget -q -O - ' . esc_url(site_url('/wp-cron.php?doing_wp_cron')) . ' >/dev/null 2>&1</code></p></div>';
+            $disable_wp_cron = defined('DISABLE_WP_CRON') && DISABLE_WP_CRON;
+            $cli_runner_path = WP_CONTENT_DIR . '/plugins/' . basename(dirname(ITN_PLUGIN_FILE)) . '/cli-backup-runner.php';
+            $cli_runner_exists = file_exists($cli_runner_path);
+            
+            if ($disable_wp_cron) {
+                echo '<div class="notice notice-warning inline"><p><strong>⚠️ WP-Cron ist deaktiviert (DISABLE_WP_CRON)!</strong><br>';
+                echo 'Für automatische Backups muss ein Server-Cron eingerichtet werden.<br><br>';
+                
+                if ($cli_runner_exists) {
+                    echo '<strong>Empfohlen: CLI-Runner (umgeht Webserver-Timeouts)</strong><br>';
+                    echo 'Füge in crontab hinzu:<br>';
+                    echo '<code>0 2 * * * cd ' . esc_html(ABSPATH) . ' && /usr/bin/php ' . esc_html($cli_runner_path) . ' backup_$(date +\\%Y\\%m\\%d_\\%H\\%M\\%S) >> /var/log/itn-backup.log 2>&1</code><br><br>';
+                    echo 'Alternative: WordPress-Cron über Web triggern:<br>';
+                } else {
+                    echo 'Alternative: WordPress-Cron über Web triggern:<br>';
+                }
+                
+                echo '<code>*/15 * * * * wget -q -O - ' . esc_url(site_url('/wp-cron.php?doing_wp_cron')) . ' >/dev/null 2>&1</code>';
+                echo '</p></div>';
+            } else {
+                if ($cli_runner_exists) {
+                    echo '<div class="notice notice-info inline"><p><strong>💡 Tipp: CLI-Runner verfügbar</strong><br>';
+                    echo 'Für große Websites empfohlen (umgeht Webserver-Timeouts):<br>';
+                    echo '<code>0 2 * * * cd ' . esc_html(ABSPATH) . ' && /usr/bin/php ' . esc_html($cli_runner_path) . ' backup_$(date +\\%Y\\%m\\%d_\\%H\\%M\\%S) >> /var/log/itn-backup.log 2>&1</code>';
+                    echo '</p></div>';
+                }
             }
             
             // Zeige nächsten geplanten Cron
@@ -174,6 +196,26 @@ $opts = array_merge(itn_settings_defaults(), get_option('itn_settings', []));
         <!-- ZIP-Verschlüsselung -->
         <div class="itn-section">
             <h2><?php _e('ZIP-Verschlüsselung', 'itn-sicherung'); ?></h2>
+            
+            <?php
+            // Check encryption capabilities
+            $has_ziparchive_encryption = class_exists('ZipArchive') && method_exists('ZipArchive', 'setEncryptionName');
+            $has_exec = !in_array('exec', array_map('trim', explode(',', ini_get('disable_functions'))), true) && function_exists('exec');
+            $has_shell_exec = !in_array('shell_exec', array_map('trim', explode(',', ini_get('disable_functions'))), true) && function_exists('shell_exec');
+            $can_exec = $has_exec || $has_shell_exec;
+            
+            if (!$has_ziparchive_encryption && !$can_exec) {
+                echo '<div class="notice notice-error inline"><p><strong>⚠️ Verschlüsselung nicht verfügbar!</strong><br>';
+                echo 'ZipArchive unterstützt keine Verschlüsselung und exec/shell_exec sind deaktiviert.<br>';
+                echo 'Verschlüsselung kann nicht funktionieren.</p></div>';
+            } elseif (!$has_ziparchive_encryption) {
+                echo '<div class="notice notice-warning inline"><p><strong>⚠️ ZipArchive-Verschlüsselung nicht verfügbar</strong><br>';
+                echo 'Fallback zu CLI-Tools (7z/zip) wird verwendet. Stelle sicher, dass 7z oder zip installiert ist.</p></div>';
+            } else {
+                echo '<div class="notice notice-success inline"><p><strong>✅ ZipArchive AES-256 Verschlüsselung verfügbar</strong></p></div>';
+            }
+            ?>
+            
             <table class="form-table">
                 <tr>
                     <th><label><?php _e('Verschlüsselung', 'itn-sicherung'); ?></label></th>
@@ -188,9 +230,10 @@ $opts = array_merge(itn_settings_defaults(), get_option('itn_settings', []));
                 <tr class="itn-zip-password-row">
                     <th><label><?php _e('Passwort', 'itn-sicherung'); ?></label></th>
                     <td>
-                        <input type="password" name="zip_encrypt_password" id="zip_encrypt_password" value="<?php echo esc_attr($opts['zip_encrypt_password'] ?? ''); ?>" class="regular-text" placeholder="<?php _e('Passwort für ZIP-Verschlüsselung', 'itn-sicherung'); ?>" />
+                        <input type="password" name="zip_encrypt_password" id="zip_encrypt_password" value="<?php echo esc_attr($opts['zip_encrypt_password'] ?? ''); ?>" class="regular-text" placeholder="<?php _e('Passwort für ZIP-Verschlüsselung', 'itn-sicherung'); ?>" minlength="12" />
                         <p class="description">
-                            <?php _e('Starkes Passwort empfohlen (min. 12 Zeichen)', 'itn-sicherung'); ?><br>
+                            <strong><?php _e('Mindestlänge: 12 Zeichen', 'itn-sicherung'); ?></strong><br>
+                            <?php _e('Starkes Passwort empfohlen (Groß-/Kleinbuchstaben, Zahlen, Sonderzeichen)', 'itn-sicherung'); ?><br>
                             <strong><?php _e('WICHTIG: Passwort gut aufbewahren! Ohne Passwort kann das Backup nicht wiederhergestellt werden.', 'itn-sicherung'); ?></strong>
                         </p>
                     </td>

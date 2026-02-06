@@ -29,6 +29,7 @@ $issues = itn_collect_environment_issues();
                         <th><?php _e('Dateiname', 'itn-sicherung'); ?></th>
                         <th><?php _e('Größe', 'itn-sicherung'); ?></th>
                         <th><?php _e('Datum', 'itn-sicherung'); ?></th>
+                        <th><?php _e('Verschlüsselt', 'itn-sicherung'); ?></th>
                         <th><?php _e('Aktionen', 'itn-sicherung'); ?></th>
                     </tr>
                 </thead>
@@ -37,6 +38,28 @@ $issues = itn_collect_environment_issues();
                     $size = ITN_Helpers::format_bytes(filesize($file));
                     $date = ITN_Helpers::format_datetime(filemtime($file));
                     $zip_basename = basename($file);
+                    
+                    // Try to detect encryption from ZIP
+                    $is_encrypted = false;
+                    $encryption_method = 'unknown';
+                    if (class_exists('ZipArchive')) {
+                        $zip = new ZipArchive();
+                        if ($zip->open($file, ZipArchive::RDONLY) === true) {
+                            // Check if backup_meta.json exists and read it
+                            if ($zip->locateName('backup_meta.json') !== false) {
+                                $meta_content = $zip->getFromName('backup_meta.json');
+                                if ($meta_content) {
+                                    $meta = json_decode($meta_content, true);
+                                    if (is_array($meta)) {
+                                        $is_encrypted = !empty($meta['encrypted']);
+                                        $encryption_method = $meta['encryption_method'] ?? 'unknown';
+                                    }
+                                }
+                            }
+                            $zip->close();
+                        }
+                    }
+                    
                     $installer_name = 'installer-' . basename($file, '.zip') . '.php';
                     $installer_path = $backup_dir . '/' . $installer_name;
                     if (!file_exists($installer_path) && class_exists('ITN_Installer_Generator')) {
@@ -51,6 +74,28 @@ $issues = itn_collect_environment_issues();
                         <td><strong><?php echo esc_html($zip_basename); ?></strong></td>
                         <td><?php echo esc_html($size); ?></td>
                         <td><?php echo esc_html($date); ?></td>
+                        <td>
+                            <?php if ($is_encrypted): ?>
+                                <span class="dashicons dashicons-lock" style="color: #00a32a;"></span>
+                                <?php
+                                switch ($encryption_method) {
+                                    case 'ziparchive':
+                                        echo '<span title="ZipArchive AES-256">AES-256</span>';
+                                        break;
+                                    case '7z-aes256':
+                                        echo '<span title="7z AES-256">AES-256 (7z)</span>';
+                                        break;
+                                    case 'zip-pkware':
+                                        echo '<span title="Zip PKWARE">PKWARE</span>';
+                                        break;
+                                    default:
+                                        echo '<span title="' . esc_attr($encryption_method) . '">Ja</span>';
+                                }
+                                ?>
+                            <?php else: ?>
+                                <span class="dashicons dashicons-unlock" style="color: #999;"></span> Nein
+                            <?php endif; ?>
+                        </td>
                         <td class="itn-actions">
                             <a class="button button-small" href="<?php echo esc_url($dl_zip); ?>">
                                 <span class="dashicons dashicons-download"></span> <?php _e('ZIP', 'itn-sicherung'); ?>
