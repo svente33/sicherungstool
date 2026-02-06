@@ -62,7 +62,7 @@ $opts = array_merge(itn_settings_defaults(), get_option('itn_settings', []));
                 if ($cli_runner_exists) {
                     echo '<strong>Empfohlen: CLI-Runner (umgeht Webserver-Timeouts)</strong><br>';
                     echo 'Füge in crontab hinzu:<br>';
-                    echo '<code>0 2 * * * cd ' . esc_html(ABSPATH) . ' && /usr/bin/php ' . esc_html($cli_runner_path) . ' backup_' . date('Ymd_His') . ' >> /var/log/itn-backup.log 2>&1</code><br><br>';
+                    echo '<code>0 2 * * * cd ' . esc_html(ABSPATH) . ' && /usr/bin/php ' . esc_html($cli_runner_path) . ' backup_$(date +\\%Y\\%m\\%d_\\%H\\%M\\%S) >> /var/log/itn-backup.log 2>&1</code><br><br>';
                     echo 'Alternative: WordPress-Cron über Web triggern:<br>';
                 } else {
                     echo 'Alternative: WordPress-Cron über Web triggern:<br>';
@@ -74,7 +74,7 @@ $opts = array_merge(itn_settings_defaults(), get_option('itn_settings', []));
                 if ($cli_runner_exists) {
                     echo '<div class="notice notice-info inline"><p><strong>💡 Tipp: CLI-Runner verfügbar</strong><br>';
                     echo 'Für große Websites empfohlen (umgeht Webserver-Timeouts):<br>';
-                    echo '<code>0 2 * * * cd ' . esc_html(ABSPATH) . ' && /usr/bin/php ' . esc_html($cli_runner_path) . ' backup_' . date('Ymd_His') . ' >> /var/log/itn-backup.log 2>&1</code>';
+                    echo '<code>0 2 * * * cd ' . esc_html(ABSPATH) . ' && /usr/bin/php ' . esc_html($cli_runner_path) . ' backup_$(date +\\%Y\\%m\\%d_\\%H\\%M\\%S) >> /var/log/itn-backup.log 2>&1</code>';
                     echo '</p></div>';
                 }
             }
@@ -199,7 +199,7 @@ $opts = array_merge(itn_settings_defaults(), get_option('itn_settings', []));
             
             <?php
             // Check encryption capabilities
-            $has_ziparchive_encryption = class_exists('ZipArchive') && method_exists(new ZipArchive(), 'setEncryptionName');
+            $has_ziparchive_encryption = class_exists('ZipArchive') && method_exists('ZipArchive', 'setEncryptionName');
             $has_exec = !in_array('exec', array_map('trim', explode(',', ini_get('disable_functions'))), true) && function_exists('exec');
             $has_shell_exec = !in_array('shell_exec', array_map('trim', explode(',', ini_get('disable_functions'))), true) && function_exists('shell_exec');
             $can_exec = $has_exec || $has_shell_exec;
