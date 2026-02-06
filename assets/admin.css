@@ -1,0 +1,302 @@
+/* ITN Sicherung Admin CSS */
+
+/* Wrapper & Title */
+.itn-wrap {
+    margin: 20px 20px 20px 2px;
+}
+.itn-title {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 23px;
+    font-weight: 400;
+    margin: 0 0 20px;
+    padding: 9px 0 4px;
+    line-height: 1.3;
+}
+.itn-title .dashicons {
+    font-size: 32px;
+    width: 32px;
+    height: 32px;
+    color: #2271b1;
+}
+
+/* Navigation Tabs */
+.itn-nav-tabs {
+    border-bottom: 1px solid #c3c4c7;
+    margin-bottom: 24px;
+}
+.itn-nav-tabs .nav-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 14px;
+}
+.itn-nav-tabs .nav-tab .dashicons {
+    font-size: 18px;
+    width: 18px;
+    height: 18px;
+}
+
+/* Tab Content */
+.itn-tab-content {
+    background: #fff;
+    padding: 24px;
+    border: 1px solid #c3c4c7;
+    border-radius: 4px;
+    box-shadow: 0 1px 1px rgba(0,0,0,0.04);
+}
+
+/* Dashboard Cards */
+.itn-dashboard {
+    max-width: 1400px;
+}
+.itn-card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 20px;
+    margin-bottom: 32px;
+}
+.itn-card {
+    background: #fff;
+    border: 1px solid #c3c4c7;
+    border-radius: 8px;
+    padding: 20px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+.itn-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+}
+.itn-card-icon {
+    font-size: 48px;
+    line-height: 1;
+}
+.itn-card-icon .dashicons {
+    font-size: 48px;
+    width: 48px;
+    height: 48px;
+}
+.itn-card-primary .itn-card-icon { color: #2271b1; }
+.itn-card-success .itn-card-icon { color: #00a32a; }
+.itn-card-info .itn-card-icon { color: #72aee6; }
+.itn-card-warning .itn-card-icon { color: #dba617; }
+.itn-card-content {
+    flex: 1;
+}
+.itn-card h3 {
+    margin: 0 0 8px;
+    font-size: 14px;
+    font-weight: 600;
+    color: #50575e;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.itn-card-stat {
+    font-size: 28px;
+    font-weight: 600;
+    margin: 0 0 4px;
+    color: #1d2327;
+}
+.itn-card-desc {
+    margin: 0;
+    font-size: 13px;
+    color: #646970;
+}
+
+/* Sections */
+.itn-section {
+    margin-bottom: 32px;
+}
+.itn-section:last-child {
+    margin-bottom: 0;
+}
+.itn-section h2 {
+    font-size: 18px;
+    margin-top: 0;
+    margin-bottom: 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #dcdcde;
+}
+
+/* Report Box */
+.itn-report-box {
+    background: #f6f7f7;
+    padding: 16px;
+    border-radius: 4px;
+    border: 1px solid #c3c4c7;
+}
+.itn-report-box .widefat {
+    background: #fff;
+}
+.itn-report-box th {
+    width: 200px;
+    font-weight: 600;
+    background: #f6f7f7;
+}
+
+/* Badge */
+.itn-badge {
+    display: inline-block;
+    padding: 4px 10px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.itn-badge-success {
+    background: #d7f2dc;
+    color: #00a32a;
+}
+.itn-badge-error {
+    background: #fcecee;
+    color: #d63638;
+}
+
+/* Cloud Status List */
+.itn-cloud-status {
+    margin: 0;
+    padding-left: 0;
+    list-style: none;
+}
+.itn-cloud-status li {
+    padding: 4px 0;
+}
+.itn-cloud-status .dashicons {
+    vertical-align: middle;
+}
+.itn-cloud-status .dashicons-yes-alt {
+    color: #00a32a;
+}
+.itn-cloud-status .dashicons-dismiss {
+    color: #d63638;
+}
+
+/* Progress Bar */
+.itn-progress {
+    margin: 20px 0;
+    padding: 16px;
+    background: #f6f7f7;
+    border-radius: 4px;
+    border: 1px solid #c3c4c7;
+}
+.itn-progress-bar {
+    background: #dcdcde;
+    border-radius: 8px;
+    overflow: hidden;
+    height: 20px;
+    margin-bottom: 12px;
+}
+.itn-progress-fill {
+    display: block;
+    height: 20px;
+    background: linear-gradient(90deg, #2271b1 0%, #135e96 100%);
+    width: 0%;
+    transition: width 0.3s ease;
+    border-radius: 8px;
+}
+.itn-progress-text {
+    margin: 0;
+    color: #1d2327;
+    font-size: 14px;
+    font-weight: 500;
+    text-align: center;
+}
+
+/* Backup Table */
+.itn-backup-table {
+    margin-top: 16px;
+}
+.itn-backup-table th {
+    font-weight: 600;
+}
+.itn-backup-table td {
+    vertical-align: middle;
+}
+.itn-backup-table .itn-actions {
+    white-space: nowrap;
+}
+.itn-backup-table .button-small {
+    padding: 4px 10px;
+    font-size: 13px;
+    height: auto;
+    line-height: 1.5;
+    margin-right: 4px;
+}
+.itn-backup-table .button-small .dashicons {
+    font-size: 16px;
+    width: 16px;
+    height: 16px;
+    vertical-align: text-bottom;
+}
+
+/* Delete Button */
+.button-link-delete {
+    color: #d63638 !important;
+    border-color: #d63638 !important;
+    background: #fff !important;
+}
+.button-link-delete:hover,
+.button-link-delete:focus {
+    color: #fff !important;
+    background: #d63638 !important;
+    border-color: #d63638 !important;
+}
+
+/* Settings Tab */
+.itn-settings-tab .form-table th {
+    width: 240px;
+    padding: 20px 10px 20px 0;
+}
+.itn-settings-tab .form-table td {
+    padding: 15px 10px;
+}
+
+/* Hero Buttons */
+.button-hero {
+    padding: 12px 24px !important;
+    height: auto !important;
+    font-size: 16px !important;
+    line-height: 1.5 !important;
+}
+.button-hero .dashicons {
+    font-size: 20px;
+    width: 20px;
+    height: 20px;
+    vertical-align: text-bottom;
+}
+
+/* Responsive */
+@media screen and (max-width: 782px) {
+    .itn-card-grid {
+        grid-template-columns: 1fr;
+    }
+    .itn-backup-table .itn-actions {
+        white-space: normal;
+    }
+    .itn-backup-table .button-small {
+        display: inline-block;
+        margin-bottom: 4px;
+    }
+    .itn-settings-tab .form-table th,
+    .itn-settings-tab .form-table td {
+        display: block;
+        width: 100%;
+        padding: 10px;
+    }
+}
+
+/* Notices in Tabs */
+.itn-tab-content .notice {
+    margin: 0 0 20px;
+}
+
+/* Loading State */
+.itn-progress[style*="display: none"] {
+    display: none !important;
+}
