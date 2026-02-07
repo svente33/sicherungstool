@@ -632,18 +632,23 @@ class ITNSicherungPlugin {
         $real_dir = realpath($backup_dir);
         $real_file = realpath($file);
         $ext = strtolower(pathinfo($real_file, PATHINFO_EXTENSION));
-        if (!$real_dir || !$real_file || strpos($real_file, $real_dir) !== 0 || !is_file($real_file) || $ext !== 'zip') {
-            wp_redirect(add_query_arg(['page'=>'itn-sicherung','tab'=>'backup','itn_notice'=>'delete_error','itn_msg'=>urlencode('Ungültige Backup-Datei (erwarte ZIP).')], admin_url('admin.php')));
+        $is_enc = str_ends_with($real_file, '.enc');
+        
+        // Accept both .zip and .zip.enc files
+        if (!$real_dir || !$real_file || strpos($real_file, $real_dir) !== 0 || !is_file($real_file) || ($ext !== 'zip' && $ext !== 'enc')) {
+            wp_redirect(add_query_arg(['page'=>'itn-sicherung','tab'=>'backup','itn_notice'=>'delete_error','itn_msg'=>urlencode('Ungültige Backup-Datei (erwarte ZIP oder ENC).')], admin_url('admin.php')));
             exit;
         }
 
-        $basename_no_ext = basename($real_file, '.zip');
+        $basename_no_ext = $is_enc ? basename($real_file, '.zip.enc') : basename($real_file, '.zip');
         $installer_candidate = $backup_dir . '/installer-' . $basename_no_ext . '.php';
         $work_dir_candidate  = $backup_dir . '/' . $basename_no_ext;
+        $report_candidate    = $is_enc ? str_replace('.zip.enc', '.report.json', $real_file) : '';
 
         $ok_zip = @unlink($real_file);
         $ok_inst = true;
         $ok_dir = true;
+        $ok_report = true;
 
         if (file_exists($installer_candidate)) {
             $ok_inst = @unlink($installer_candidate);
@@ -651,8 +656,11 @@ class ITNSicherungPlugin {
         if (is_dir($work_dir_candidate)) {
             $ok_dir = ITN_Helpers::rrmdir($work_dir_candidate);
         }
+        if ($report_candidate && file_exists($report_candidate)) {
+            $ok_report = @unlink($report_candidate);
+        }
 
-        if ($ok_zip && $ok_inst && $ok_dir) {
+        if ($ok_zip && $ok_inst && $ok_dir && $ok_report) {
             wp_redirect(add_query_arg(['page'=>'itn-sicherung','tab'=>'backup','itn_notice'=>'delete_ok','itn_msg'=>urlencode('Backup vollständig gelöscht: '.basename($real_file))], admin_url('admin.php')));
         } else {
             $parts = [];
@@ -885,7 +893,9 @@ class ITNSicherungPlugin {
 
         $opts = array_merge(itn_settings_defaults(), get_option('itn_settings', []));
         $backup_dir = $opts['backup_dir'] ?? ITN_BACKUP_DIR;
-        $backups = glob($backup_dir . '/*.zip') ?: [];
+        $backups_zip = glob($backup_dir . '/*.zip') ?: [];
+        $backups_enc = glob($backup_dir . '/*.zip.enc') ?: [];
+        $backups = array_merge($backups_zip, $backups_enc);
         rsort($backups);
 
         $active_tab = isset($_GET['tab']) ? sanitize_text_field($_GET['tab']) : 'dashboard';
