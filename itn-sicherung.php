@@ -632,11 +632,17 @@ class ITNSicherungPlugin {
         $real_dir = realpath($backup_dir);
         $real_file = realpath($file);
         $ext = strtolower(pathinfo($real_file, PATHINFO_EXTENSION));
-        $is_enc = str_ends_with($real_file, '.enc');
+        $is_enc = (substr($real_file, -8) === '.zip.enc'); // Check for .zip.enc specifically
         
         // Accept both .zip and .zip.enc files
-        if (!$real_dir || !$real_file || strpos($real_file, $real_dir) !== 0 || !is_file($real_file) || ($ext !== 'zip' && $ext !== 'enc')) {
-            wp_redirect(add_query_arg(['page'=>'itn-sicherung','tab'=>'backup','itn_notice'=>'delete_error','itn_msg'=>urlencode('Ungültige Backup-Datei (erwarte ZIP oder ENC).')], admin_url('admin.php')));
+        if (!$real_dir || !$real_file || strpos($real_file, $real_dir) !== 0 || !is_file($real_file)) {
+            wp_redirect(add_query_arg(['page'=>'itn-sicherung','tab'=>'backup','itn_notice'=>'delete_error','itn_msg'=>urlencode('Ungültige Backup-Datei.')], admin_url('admin.php')));
+            exit;
+        }
+        
+        // Validate file extension: must be .zip or .zip.enc
+        if (!$is_enc && $ext !== 'zip') {
+            wp_redirect(add_query_arg(['page'=>'itn-sicherung','tab'=>'backup','itn_notice'=>'delete_error','itn_msg'=>urlencode('Ungültige Backup-Datei (erwarte ZIP oder ZIP.ENC).')], admin_url('admin.php')));
             exit;
         }
 

@@ -343,7 +343,8 @@ class ITN_Backup {
             $this->zip_path = $final_backup_path;
 
             // Create external report file for encrypted containers (since meta is inside encrypted ZIP)
-            if ($this->encryption_method === 'php-openssl-aes-256-gcm' && str_ends_with($this->zip_path, '.enc')) {
+            $is_enc_container = ($this->encryption_method === 'php-openssl-aes-256-gcm' && substr($this->zip_path, -4) === '.enc');
+            if ($is_enc_container) {
                 $report_path = str_replace('.zip.enc', '.report.json', $this->zip_path);
                 $report_data = [
                     'created_at' => date('c', $this->timestamp),

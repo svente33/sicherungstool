@@ -147,7 +147,7 @@ function decrypt_container(string $enc_path, string $password): string {
     }
     
     // Verify minimum size
-    $header_size = 8 + 1 + 16 + 4 + 12 + 16; // MAGIC + VERSION + SALT + ITERATIONS + IV + TAG
+    $header_size = 8 + 1 + ITN_ENC_SALT_LENGTH + 4 + ITN_ENC_IV_LENGTH + ITN_ENC_TAG_LENGTH; // MAGIC + VERSION + SALT + ITERATIONS + IV + TAG
     if (strlen($container) < $header_size) {
         throw new Exception('Ungültige Container-Datei (zu klein)');
     }

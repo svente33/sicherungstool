@@ -277,13 +277,18 @@ class ITN_Encryption {
             return false;
         }
         
-        $handle = fopen($file_path, 'rb');
+        $handle = @fopen($file_path, 'rb');
         if (!$handle) {
             return false;
         }
         
         $magic = fread($handle, 8);
         fclose($handle);
+        
+        // Check for false return (read error) or empty string
+        if ($magic === false || $magic === '') {
+            return false;
+        }
         
         return $magic === self::MAGIC;
     }

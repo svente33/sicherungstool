@@ -38,14 +38,15 @@ $issues = itn_collect_environment_issues();
                     $size = ITN_Helpers::format_bytes(filesize($file));
                     $date = ITN_Helpers::format_datetime(filemtime($file));
                     $zip_basename = basename($file);
-                    $is_enc = str_ends_with($file, '.enc');
+                    $is_enc = (substr($file, -4) === '.enc');
                     
                     // For .enc files, try to read encryption info from .report.json
                     $encryption_info = '';
                     if ($is_enc) {
                         $report_file = str_replace('.zip.enc', '.report.json', $file);
                         if (file_exists($report_file)) {
-                            $report_data = json_decode(file_get_contents($report_file), true);
+                            $report_json = @file_get_contents($report_file);
+                            $report_data = $report_json ? @json_decode($report_json, true) : null;
                             if ($report_data && isset($report_data['encryption_method'])) {
                                 if ($report_data['encryption_method'] === 'php-openssl-aes-256-gcm') {
                                     $encryption_info = '🔒 AES-256-GCM Container';
@@ -53,6 +54,8 @@ $issues = itn_collect_environment_issues();
                                     $encryption_info = '🔒 Verschlüsselt';
                                 }
                             } else {
+                                // Log warning if report file is invalid
+                                error_log('ITN: Failed to parse report file: ' . $report_file);
                                 $encryption_info = '🔒 Verschlüsselt (.enc)';
                             }
                         } else {
