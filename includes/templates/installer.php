@@ -137,6 +137,14 @@ function copy_recursive(string $src, string $dst, array $exclude = []): void {
 }
 
 /**
+ * Validate identifier (table/column name) for SQL safety
+ * Only allows alphanumeric characters and underscore
+ */
+function is_valid_sql_identifier(string $name): bool {
+    return preg_match('/^[a-zA-Z0-9_]+$/', $name) === 1;
+}
+
+/**
  * Detect WordPress table prefix from database
  * Looks for common WordPress tables and extracts prefix
  */
@@ -371,6 +379,12 @@ function wp_search_replace_db(mysqli $mysqli, string $prefix, string $old_url, s
     while ($table_row = $tables_res->fetch_array()) {
         $table = (string)$table_row[0];
 
+        // Validate table name for SQL safety
+        if (!is_valid_sql_identifier($table)) {
+            log_message("WARN: Ungültiger Tabellenname übersprungen: {$table}");
+            continue;
+        }
+
         // Strikt: nur Tabellen mit dem angegebenen Präfix
         if ($prefix !== '' && !str_starts_with($table, $prefix)) {
             continue;
@@ -393,6 +407,11 @@ function wp_search_replace_db(mysqli $mysqli, string $prefix, string $old_url, s
         while ($col = $cols_res->fetch_assoc()) {
             $column = (string)($col['Field'] ?? '');
             $type = strtolower((string)($col['Type'] ?? ''));
+
+            // Validate column name for SQL safety
+            if (!is_valid_sql_identifier($column)) {
+                continue;
+            }
 
             if (
                 strpos($type, 'char') === false &&
@@ -580,7 +599,7 @@ function sql_import_file(mysqli $mysqli, string $file): void {
 // ------------------------------------------------------------
 // WordPress-config Generator (safer, WP_HOME/SITEURL nur bei Migration)
 // ------------------------------------------------------------
-function build_wp_config(array $db, string $absolutePath, ?string $homeUrl = null, ?string $siteUrl = null, bool $addUrlDefines = false): string {
+function build_wp_config(array $db, string $absolutePath, ?string $homeUrl = null, ?string $siteUrl = null, bool $add_url_defines = false): string {
     // Validate ABSPATH
     $abs = rtrim(str_replace('\\', '/', $absolutePath), '/');
     if (empty($abs) || !is_dir($abs)) {
@@ -590,7 +609,7 @@ function build_wp_config(array $db, string $absolutePath, ?string $homeUrl = nul
 
     // URL-Defines nur hinzufügen, wenn explizit gewünscht (z.B. bei Migration)
     $urlDefines = '';
-    if ($addUrlDefines) {
+    if ($add_url_defines) {
         if ($homeUrl) {
             $urlDefines .= "define('WP_HOME', '" . addslashes(rtrim($homeUrl, '/')) . "');\n";
         }
@@ -844,13 +863,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'impor
         sql_import_file($mysqli, $sql_file);
         log_message('SQL importiert');
 
-        // Auto-detect prefix if not in metadata or empty
-        if (empty($db_prefix) || $db_prefix === 'wp_') {
+        // Auto-detect prefix if not provided or empty (but 'wp_' is valid and should not trigger detection)
+        if (empty($db_prefix)) {
             $detected = detect_table_prefix($mysqli);
-            if ($detected !== 'wp_') {
-                log_message("Präfix auto-erkannt: {$detected}");
-                $db_prefix = $detected;
-            }
+            log_message("Präfix auto-erkannt: {$detected}");
+            $db_prefix = $detected;
         }
 
         $mysqli->close();
