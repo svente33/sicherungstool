@@ -136,6 +136,54 @@ function copy_recursive(string $src, string $dst, array $exclude = []): void {
     closedir($dir);
 }
 
+/**
+ * Validate identifier (table/column name) for SQL safety
+ * Only allows alphanumeric characters and underscore
+ */
+function is_valid_sql_identifier(string $name): bool {
+    return preg_match('/^[a-zA-Z0-9_]+$/', $name) === 1;
+}
+
+/**
+ * Detect WordPress table prefix from database
+ * Looks for common WordPress tables and extracts prefix
+ */
+function detect_table_prefix(mysqli $mysqli): string {
+    $common_tables = ['options', 'posts', 'users', 'usermeta', 'postmeta', 'terms', 'term_taxonomy'];
+    
+    $tables_res = $mysqli->query("SHOW TABLES");
+    if (!$tables_res) return 'wp_';
+    
+    $all_tables = [];
+    while ($row = $tables_res->fetch_array()) {
+        $all_tables[] = (string)$row[0];
+    }
+    
+    // Try to find tables ending with common WP table names
+    foreach ($common_tables as $suffix) {
+        foreach ($all_tables as $table) {
+            if (str_ends_with($table, $suffix)) {
+                // Extract prefix
+                $prefix = substr($table, 0, -strlen($suffix));
+                
+                // Validate: check if at least 3 other common tables exist with this prefix
+                $match_count = 0;
+                foreach ($common_tables as $check_suffix) {
+                    if (in_array($prefix . $check_suffix, $all_tables)) {
+                        $match_count++;
+                    }
+                }
+                
+                if ($match_count >= 3) {
+                    return $prefix;
+                }
+            }
+        }
+    }
+    
+    return 'wp_'; // Default fallback
+}
+
 // ------------------------------------------------------------
 // Serialisierung: robust & sicher
 // ------------------------------------------------------------
@@ -188,11 +236,137 @@ function recursive_replace($search, $replace, $subject) {
     return $subject;
 }
 
+// ------------------------------------------------------------
+// Encryption/Decryption Functions (for encrypted containers)
+// ------------------------------------------------------------
+
+/**
+ * Check if file is an encrypted container
+ */
+function is_encrypted_container(string $path): bool {
+    if (!file_exists($path)) return false;
+    $handle = @fopen($path, 'rb');
+    if (!$handle) return false;
+    $header = fread($handle, 8);
+    fclose($handle);
+    return $header === 'ITNENC01';
+}
+
+/**
+ * Decrypt encrypted container file
+ * Returns path to decrypted temp file or throws exception
+ */
+function decrypt_container(string $container_path, string $password): string {
+    if (empty($password)) {
+        throw new Exception('Passwort erforderlich für verschlüsselte Backups');
+    }
+    
+    global $TEMP_DIR, $RESTORE_DIR;
+    
+    // Read container
+    $container = file_get_contents($container_path);
+    if ($container === false) {
+        throw new Exception('Container konnte nicht gelesen werden');
+    }
+    
+    $container_len = strlen($container);
+    $header = 'ITNENC01';
+    $header_len = 8;
+    $salt_len = 32;
+    
+    // Validate header
+    if ($container_len < $header_len || substr($container, 0, $header_len) !== $header) {
+        throw new Exception('Ungültiger verschlüsselter Container');
+    }
+    
+    // Extract salt
+    $pos = $header_len;
+    if ($container_len < $pos + $salt_len) {
+        throw new Exception('Container beschädigt: Salt fehlt');
+    }
+    $salt = substr($container, $pos, $salt_len);
+    $pos += $salt_len;
+    
+    $plaintext = false;
+    
+    // Try Sodium first (XSalsa20-Poly1305)
+    if (function_exists('sodium_crypto_secretbox_open') && function_exists('sodium_crypto_pwhash')) {
+        $nonce_len = 24; // SODIUM_CRYPTO_SECRETBOX_NONCEBYTES
+        if ($container_len >= $pos + $nonce_len) {
+            $nonce = substr($container, $pos, $nonce_len);
+            $ciphertext = substr($container, $pos + $nonce_len);
+            
+            // Derive key with Argon2id
+            try {
+                $key = sodium_crypto_pwhash(
+                    32, // SODIUM_CRYPTO_SECRETBOX_KEYBYTES
+                    $password,
+                    $salt,
+                    SODIUM_CRYPTO_PWHASH_OPSLIMIT_INTERACTIVE,
+                    SODIUM_CRYPTO_PWHASH_MEMLIMIT_INTERACTIVE
+                );
+                
+                $plaintext = sodium_crypto_secretbox_open($ciphertext, $nonce, $key);
+                sodium_memzero($key);
+                
+                if ($plaintext !== false) {
+                    log_message('Container mit Sodium entschlüsselt');
+                }
+            } catch (Throwable $e) {
+                log_message('Sodium decryption failed: ' . $e->getMessage());
+            }
+        }
+    }
+    
+    // Try OpenSSL if Sodium failed (AES-256-GCM)
+    if ($plaintext === false && function_exists('openssl_decrypt')) {
+        $iv_len = 16;
+        $tag_len = 16;
+        
+        if ($container_len >= $pos + $iv_len + $tag_len) {
+            $iv = substr($container, $pos, $iv_len);
+            $ciphertext_and_tag = substr($container, $pos + $iv_len);
+            $ciphertext = substr($ciphertext_and_tag, 0, -$tag_len);
+            $tag = substr($ciphertext_and_tag, -$tag_len);
+            
+            // Derive key with PBKDF2
+            $key = hash_pbkdf2('sha256', $password, $salt, 100000, 32, true);
+            
+            $plaintext = openssl_decrypt(
+                $ciphertext,
+                'aes-256-gcm',
+                $key,
+                OPENSSL_RAW_DATA,
+                $iv,
+                $tag
+            );
+            
+            if ($plaintext !== false) {
+                log_message('Container mit OpenSSL entschlüsselt');
+            }
+        }
+    }
+    
+    if ($plaintext === false) {
+        throw new Exception('Entschlüsselung fehlgeschlagen: falsches Passwort oder beschädigter Container');
+    }
+    
+    // Write decrypted file to temp location
+    $decrypted_path = $RESTORE_DIR . '/decrypted_backup_' . time() . '.zip';
+    if (file_put_contents($decrypted_path, $plaintext) === false) {
+        throw new Exception('Konnte entschlüsselte Datei nicht schreiben');
+    }
+    
+    log_message('Entschlüsselte Datei: ' . $decrypted_path . ' (' . strlen($plaintext) . ' bytes)');
+    return $decrypted_path;
+}
+
 /**
  * WordPress Search/Replace DB
- * - Nur Tabellen des Präfix (falls vorhanden) oder alle (Fallback)
- * - Behandelt serialisierte Werte korrekt (serialize nach Änderung)
- * - Nutzt Prepared Statements, wo möglich
+ * - Nur Tabellen des Präfix verarbeiten (strikt)
+ * - Behandelt serialisierte Werte korrekt
+ * - Nutzt Prepared Statements
+ * - Sichere Serialisierungs-Behandlung
  */
 function wp_search_replace_db(mysqli $mysqli, string $prefix, string $old_url, string $new_url): int {
     $updated = 0;
@@ -205,11 +379,15 @@ function wp_search_replace_db(mysqli $mysqli, string $prefix, string $old_url, s
     while ($table_row = $tables_res->fetch_array()) {
         $table = (string)$table_row[0];
 
-        // Optional: auf Präfix einschränken, wenn sinnvoll
-        if ($prefix !== '' && str_starts_with($table, $prefix) === false) {
-            // Manche Backups haben andere Präfixe oder keine, daher NICHT strikt skippen.
-            // Wenn du strikt nur Prefix willst: hier continue.
-            // continue;
+        // Validate table name for SQL safety
+        if (!is_valid_sql_identifier($table)) {
+            log_message("WARN: Ungültiger Tabellenname übersprungen: {$table}");
+            continue;
+        }
+
+        // Strikt: nur Tabellen mit dem angegebenen Präfix
+        if ($prefix !== '' && !str_starts_with($table, $prefix)) {
+            continue;
         }
 
         // Primary Key ermitteln
@@ -230,6 +408,11 @@ function wp_search_replace_db(mysqli $mysqli, string $prefix, string $old_url, s
             $column = (string)($col['Field'] ?? '');
             $type = strtolower((string)($col['Type'] ?? ''));
 
+            // Validate column name for SQL safety
+            if (!is_valid_sql_identifier($column)) {
+                continue;
+            }
+
             if (
                 strpos($type, 'char') === false &&
                 strpos($type, 'text') === false &&
@@ -239,9 +422,16 @@ function wp_search_replace_db(mysqli $mysqli, string $prefix, string $old_url, s
                 continue;
             }
 
-            $old_like = '%' . $mysqli->real_escape_string($old_url) . '%';
-            $sql = "SELECT `{$pk}`, `{$column}` FROM `{$table}` WHERE `{$column}` LIKE '{$old_like}'";
-            $rows = $mysqli->query($sql);
+            // Use prepared statement for LIKE query
+            $stmt = $mysqli->prepare("SELECT `{$pk}`, `{$column}` FROM `{$table}` WHERE `{$column}` LIKE ?");
+            if (!$stmt) continue;
+            
+            $old_like = '%' . $old_url . '%';
+            $stmt->bind_param('s', $old_like);
+            $stmt->execute();
+            $rows = $stmt->get_result();
+            $stmt->close();
+            
             if (!$rows) continue;
 
             while ($row = $rows->fetch_assoc()) {
@@ -255,12 +445,16 @@ function wp_search_replace_db(mysqli $mysqli, string $prefix, string $old_url, s
                 if (is_string($old_value) && is_serialized_string($old_value)) {
                     $un = safe_unserialize($old_value);
 
-                    // Falls unser safe_unserialize den String zurückgibt, war es kaputt -> dann fallback str_replace
-                    if (is_string($un) && $un === $old_value) {
-                        $new_value = str_replace($old_url, $new_url, $old_value);
-                    } else {
+                    // Nur wenn Unserialisierung erfolgreich war, serialisierte Ersetzung durchführen
+                    if ($un !== $old_value || !is_string($un)) {
+                        // Erfolgreich unserialisiert
                         $new_un = recursive_replace($old_url, $new_url, $un);
                         $new_value = serialize($new_un);
+                    } else {
+                        // Unserialisierung fehlgeschlagen, aber ist serialisiert -> NICHT ändern
+                        // Safer: leave corrupt serialized data untouched
+                        log_message("WARN: Korrupte Serialisierung in {$table}.{$column} (PK={$pk_val}) - überspringe");
+                        continue;
                     }
                 } elseif (is_string($old_value)) {
                     $new_value = str_replace($old_url, $new_url, $old_value);
@@ -285,9 +479,11 @@ function wp_search_replace_db(mysqli $mysqli, string $prefix, string $old_url, s
 // SQL Import: robust (multi_query ist bei großen Dumps fehleranfällig)
 // ------------------------------------------------------------
 /**
- * Sehr einfacher SQL-Splitter (funktioniert für typische WP-Backups).
- * - Entfernt Kommentare (/* * / und -- und #)
+ * Robust SQL-Splitter für WordPress-Backups.
+ * - Entfernt Kommentare (/* * /, -- und #)
  * - Splittet auf ';' außerhalb von Strings
+ * - Behandelt Backticks und Escapes korrekt
+ * - Transaction rollback bei Fehler
  */
 function sql_import_file(mysqli $mysqli, string $file): void {
     $fh = fopen($file, 'rb');
@@ -298,80 +494,102 @@ function sql_import_file(mysqli $mysqli, string $file): void {
     $buffer = '';
     $in_string = false;
     $string_char = '';
+    $in_block_comment = false;
     $line_num = 0;
 
     $mysqli->query("SET FOREIGN_KEY_CHECKS=0");
+    $mysqli->query("SET sql_mode='NO_AUTO_VALUE_ON_ZERO'");
+    $mysqli->begin_transaction();
 
-    while (($line = fgets($fh)) !== false) {
-        $line_num++;
+    try {
+        while (($line = fgets($fh)) !== false) {
+            $line_num++;
 
-        // BOM entfernen
-        if ($line_num === 1) {
-            $line = preg_replace('/^\xEF\xBB\xBF/', '', $line);
-        }
+            // BOM entfernen
+            if ($line_num === 1) {
+                $line = preg_replace('/^\xEF\xBB\xBF/', '', $line);
+            }
 
-        // Skip line comments
-        $trim = ltrim($line);
-        if (!$in_string) {
-            if ($trim === '' || $trim === "\n" || $trim === "\r\n") continue;
-            if (str_starts_with($trim, '-- ') || str_starts_with($trim, '#')) continue;
-        }
+            // Skip empty lines and line comments when not in string
+            $trim = ltrim($line);
+            if (!$in_string && !$in_block_comment) {
+                if ($trim === '' || $trim === "\n" || $trim === "\r\n") continue;
+                if (str_starts_with($trim, '-- ') || str_starts_with($trim, '#')) continue;
+            }
 
-        // Block comments grob entfernen (nicht perfekt, aber ok für WP dumps)
-        if (!$in_string) {
-            // Entferne /* ... */ innerhalb der Zeile (greedy vermeiden)
-            $line = preg_replace('#/\*.*?\*/#s', '', $line);
-        }
+            // Process character by character for proper parsing
+            $len = strlen($line);
+            for ($i = 0; $i < $len; $i++) {
+                $ch = $line[$i];
+                $next = ($i + 1 < $len) ? $line[$i + 1] : '';
 
-        $len = strlen($line);
-        for ($i = 0; $i < $len; $i++) {
-            $ch = $line[$i];
+                // Handle block comments
+                if (!$in_string) {
+                    if (!$in_block_comment && $ch === '/' && $next === '*') {
+                        $in_block_comment = true;
+                        $i++; // skip *
+                        continue;
+                    }
+                    if ($in_block_comment && $ch === '*' && $next === '/') {
+                        $in_block_comment = false;
+                        $i++; // skip /
+                        continue;
+                    }
+                    if ($in_block_comment) continue;
+                }
 
-            if ($in_string) {
-                if ($ch === $string_char) {
-                    // Escapes beachten
-                    $bs = 0;
-                    $j = $i - 1;
-                    while ($j >= 0 && $line[$j] === '\\') { $bs++; $j--; }
-                    if ($bs % 2 === 0) {
+                if ($in_string) {
+                    if ($ch === '\\' && $next !== '') {
+                        // Handle escape sequences
+                        $buffer .= $ch . $next;
+                        $i++; // skip next char
+                        continue;
+                    }
+                    if ($ch === $string_char) {
                         $in_string = false;
                         $string_char = '';
                     }
+                    $buffer .= $ch;
+                    continue;
                 }
-                $buffer .= $ch;
-                continue;
-            }
 
-            if ($ch === '\'' || $ch === '"') {
-                $in_string = true;
-                $string_char = $ch;
-                $buffer .= $ch;
-                continue;
-            }
+                if ($ch === '\'' || $ch === '"' || $ch === '`') {
+                    $in_string = true;
+                    $string_char = $ch;
+                    $buffer .= $ch;
+                    continue;
+                }
 
-            if ($ch === ';') {
-                $buffer .= ';';
-                $query = trim($buffer);
-                $buffer = '';
+                if ($ch === ';') {
+                    $buffer .= ';';
+                    $query = trim($buffer);
+                    $buffer = '';
 
-                if ($query !== '' && $query !== ';') {
-                    if (!$mysqli->query($query)) {
-                        $err = $mysqli->error;
-                        throw new Exception("SQL-Fehler (Zeile ~{$line_num}): {$err}");
+                    if ($query !== '' && $query !== ';') {
+                        if (!$mysqli->query($query)) {
+                            $err = $mysqli->error;
+                            throw new Exception("SQL-Fehler (Zeile ~{$line_num}): {$err}");
+                        }
                     }
+                    continue;
                 }
-                continue;
+
+                $buffer .= $ch;
             }
-
-            $buffer .= $ch;
         }
-    }
 
-    $tail = trim($buffer);
-    if ($tail !== '') {
-        if (!$mysqli->query($tail)) {
-            throw new Exception('SQL-Fehler (Ende der Datei): ' . $mysqli->error);
+        $tail = trim($buffer);
+        if ($tail !== '') {
+            if (!$mysqli->query($tail)) {
+                throw new Exception('SQL-Fehler (Ende der Datei): ' . $mysqli->error);
+            }
         }
+
+        $mysqli->commit();
+    } catch (Exception $e) {
+        $mysqli->rollback();
+        fclose($fh);
+        throw $e;
     }
 
     $mysqli->query("SET FOREIGN_KEY_CHECKS=1");
@@ -379,23 +597,26 @@ function sql_import_file(mysqli $mysqli, string $file): void {
 }
 
 // ------------------------------------------------------------
-// WordPress-config Generator (safer, inkl. FS_METHOD, WP_HOME/SITEURL optional)
+// WordPress-config Generator (safer, WP_HOME/SITEURL nur bei Migration)
 // ------------------------------------------------------------
-function build_wp_config(array $db, string $absolutePath, ?string $homeUrl = null, ?string $siteUrl = null): string {
-    $abs = rtrim(str_replace('\\', '/', $absolutePath), '/') . '/';
+function build_wp_config(array $db, string $absolutePath, ?string $homeUrl = null, ?string $siteUrl = null, bool $add_url_defines = false): string {
+    // Validate ABSPATH
+    $abs = rtrim(str_replace('\\', '/', $absolutePath), '/');
+    if (empty($abs) || !is_dir($abs)) {
+        throw new Exception('Ungültiger ABSPATH: ' . $absolutePath);
+    }
+    $abs .= '/';
 
-    // Optional URL-Defines helfen, wenn optionen inkonsistent sind / Migration hakt
+    // URL-Defines nur hinzufügen, wenn explizit gewünscht (z.B. bei Migration)
     $urlDefines = '';
-    if ($homeUrl) {
-        $urlDefines .= "define('WP_HOME', '" . addslashes(rtrim($homeUrl, '/')) . "');\n";
+    if ($add_url_defines) {
+        if ($homeUrl) {
+            $urlDefines .= "define('WP_HOME', '" . addslashes(rtrim($homeUrl, '/')) . "');\n";
+        }
+        if ($siteUrl) {
+            $urlDefines .= "define('WP_SITEURL', '" . addslashes(rtrim($siteUrl, '/')) . "');\n";
+        }
     }
-    if ($siteUrl) {
-        $urlDefines .= "define('WP_SITEURL', '" . addslashes(rtrim($siteUrl, '/')) . "');\n";
-    }
-
-    // Häufige Ursache für "kritische Fehler": falsche FS Rechte -> setze direct, wenn möglich
-    // (kann man später entfernen)
-    $fsMethod = "define('FS_METHOD', 'direct');\n";
 
     return "<?php
 /**
@@ -412,7 +633,6 @@ define('DB_CHARSET', 'utf8mb4');
 define('DB_COLLATE', '');
 
 " . $urlDefines . "
-" . $fsMethod . "
 
 define('AUTH_KEY',         '" . safe_password() . "');
 define('SECURE_AUTH_KEY',  '" . safe_password() . "');
@@ -483,6 +703,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'extra
         }
 
         ensure_dir($TEMP_DIR);
+        
+        // Check if container is encrypted and decrypt if needed
+        $is_encrypted = is_encrypted_container($zip_file_path);
+        $decrypted_file = null;
+        
+        if ($is_encrypted) {
+            log_message('Verschlüsselter Container erkannt - starte Entschlüsselung');
+            try {
+                $decrypted_file = decrypt_container($zip_file_path, $zip_password);
+                $zip_file_path = $decrypted_file;
+                log_message('Entschlüsselung erfolgreich');
+            } catch (Exception $e) {
+                throw new Exception('Entschlüsselung fehlgeschlagen: ' . $e->getMessage());
+            }
+        }
 
         $zip = new ZipArchive();
         $openRes = $zip->open($zip_file_path);
@@ -515,6 +750,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'extra
 
         $zip->close();
         log_message('Entpacken erfolgreich');
+        
+        // Clean up decrypted temp file if it was created
+        if ($decrypted_file && file_exists($decrypted_file)) {
+            @unlink($decrypted_file);
+            log_message('Temporäre entschlüsselte Datei gelöscht');
+        }
 
         // Meta
         $meta = [];
@@ -622,6 +863,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'impor
         sql_import_file($mysqli, $sql_file);
         log_message('SQL importiert');
 
+        // Auto-detect prefix if not provided or empty (but 'wp_' is valid and should not trigger detection)
+        if (empty($db_prefix)) {
+            $detected = detect_table_prefix($mysqli);
+            log_message("Präfix auto-erkannt: {$detected}");
+            $db_prefix = $detected;
+        }
+
         $mysqli->close();
 
         $_SESSION['db_config'] = [
@@ -670,21 +918,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'resto
         copy_recursive($tempDir, $RESTORE_DIR, $exclude);
         log_message('Dateien kopiert');
 
-        // 2) wp-config.php neu erstellen (mit optionalen URL-Defines)
+        // 2) wp-config.php neu erstellen
         $db = $_SESSION['db_config'];
         $absPath = realpath($RESTORE_DIR) ?: $RESTORE_DIR;
 
-        // Optional: für Stabilität direkt definieren (kann später entfernt werden)
-        $config = build_wp_config($db, $absPath, $new_url, $new_url);
+        // Prüfe ob Migration nötig ist (URL hat sich geändert)
+        $meta = $_SESSION['meta'] ?? [];
+        $old_url = rtrim((string)($meta['site_url'] ?? ''), '/');
+        $needsMigration = ($old_url !== '' && $old_url !== $new_url);
+
+        // URL-Defines nur bei Migration hinzufügen
+        $config = build_wp_config($db, $absPath, $new_url, $new_url, $needsMigration);
         if (@file_put_contents($RESTORE_DIR . '/wp-config.php', $config) === false) {
             throw new Exception('Kann wp-config.php nicht schreiben (Rechte?)');
         }
-        log_message('wp-config.php erstellt');
+        log_message('wp-config.php erstellt' . ($needsMigration ? ' (mit URL-Defines für Migration)' : ''));
 
         // 3) DB-Migration
-        $meta = $_SESSION['meta'] ?? [];
-        $old_url = rtrim((string)($meta['site_url'] ?? ''), '/');
-
         $old_path = normalize_path((string)($meta['abs_path'] ?? ''));
         $new_path = normalize_path((string)$absPath);
 
@@ -754,9 +1004,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'resto
             log_message('Pfade ersetzt');
         }
 
-        // 4) Plugin Aktivierung: NICHT aggressiv überschreiben.
-        //    Problem: "Plugins nicht aktiviert" entsteht oft durch kaputte Serialisierung, falsche SiteURL oder DB Import.
-        //    Wir reparieren nur, wenn active_plugins nicht sauber unserialisierbar ist.
+        // 4) Plugin Aktivierung: Nur reparieren wenn wirklich korrupt
+        //    Wenn active_plugins lesbar ist, belassen wir es unverändert
         if ($hasOptions) {
             $res = $mysqli->query("SELECT option_value FROM `{$optTable}` WHERE option_name='active_plugins' LIMIT 1");
             $active_raw = '';
@@ -764,19 +1013,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'resto
                 $active_raw = (string)($r[0] ?? '');
             }
 
-            $active = null;
             if ($active_raw !== '') {
                 $tmp = safe_unserialize($active_raw);
-                if (is_array($tmp)) $active = $tmp;
-            }
-
-            if ($active_raw !== '' && !is_array($active)) {
-                log_message('active_plugins ist nicht lesbar -> setze auf leeres Array (WordPress Standard)');
-                $empty = serialize([]);
-                $stmt = $mysqli->prepare("UPDATE `{$optTable}` SET option_value=? WHERE option_name='active_plugins'");
-                if ($stmt) { $stmt->bind_param('s', $empty); $stmt->execute(); $stmt->close(); }
-            } else {
-                log_message('active_plugins OK (wird nicht überschrieben)');
+                
+                // Nur reparieren wenn tatsächlich korrupt (nicht unserialisierbar ODER kein Array)
+                if ($tmp === $active_raw || !is_array($tmp)) {
+                    log_message('active_plugins ist korrupt -> repariere zu leerem Array');
+                    $empty = serialize([]);
+                    $stmt = $mysqli->prepare("UPDATE `{$optTable}` SET option_value=? WHERE option_name='active_plugins'");
+                    if ($stmt) { $stmt->bind_param('s', $empty); $stmt->execute(); $stmt->close(); }
+                } else {
+                    log_message('active_plugins OK (gültig unserialisiert, wird nicht geändert)');
+                }
             }
 
             // Optional: template/stylesheet prüfen (Theme)

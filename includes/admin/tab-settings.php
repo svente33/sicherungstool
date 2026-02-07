@@ -64,6 +64,19 @@ $opts = array_merge(itn_settings_defaults(), get_option('itn_settings', []));
             } else {
                 echo '<div class="notice notice-error inline"><p><strong>❌ Kein Backup geplant!</strong> Bitte Einstellungen speichern um Zeitplan zu aktivieren.</p></div>';
             }
+            
+            // System-Cron Anleitung
+            $php_binary = defined('PHP_BINARY') ? PHP_BINARY : 'php';
+            $cli_runner_path = ITN_PLUGIN_DIR . 'cli-backup-runner.php';
+            $cron_command = escapeshellarg($php_binary) . ' ' . escapeshellarg($cli_runner_path) . ' --cron';
+            
+            echo '<div class="notice notice-info inline" style="margin-top: 15px;">';
+            echo '<p><strong>🔧 System-Cron Einrichtung (Empfohlen für zuverlässige Backups):</strong><br>';
+            echo 'Für eine zuverlässigere Zeitsteuerung können Sie einen System-Cron einrichten, der die Backups ohne Zeitbeschränkung ausführt.<br>';
+            echo 'Fügen Sie folgende Zeile zu Ihrer crontab hinzu (z.B. für tägliche Backups um 02:00 Uhr):<br>';
+            echo '<code style="display: block; padding: 10px; background: #f0f0f0; margin: 10px 0; overflow-x: auto;">0 2 * * * ' . esc_html($cron_command) . ' >> /var/log/itn-backup.log 2>&1</code>';
+            echo '<small>Hinweis: Passen Sie die Zeitangabe (0 2 * * *) nach Bedarf an. Der obige Befehl verwendet den --cron Modus, der automatisch eine Run-ID generiert.</small>';
+            echo '</p></div>';
             ?>
             
             <table class="form-table">
