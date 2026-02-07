@@ -52,7 +52,9 @@ require_once(dirname(__FILE__) . '/includes/class-itn-backup.php');
 require_once(dirname(__FILE__) . '/includes/class-itn-schedule.php');
 require_once(dirname(__FILE__) . '/includes/class-itn-installer-generator.php');
 
-// Lade Einstellungen
+// Lade Einstellungen (shared with WordPress)
+// Note: This function must match itn_settings_defaults() in the main plugin file
+// to ensure consistent default values between web and CLI modes
 function itn_cli_settings_defaults() {
     return [
         'exclude_paths' => [],

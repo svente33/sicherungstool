@@ -14,7 +14,7 @@ class ITN_Encryption {
     const FORMAT_VERSION = 1;
     const HEADER = 'ITNENC01'; // 8 bytes
     const SALT_LENGTH = 32;
-    const SODIUM_NONCE_LENGTH = 24; // NONCE_BYTES for secretbox
+    const SODIUM_NONCE_LENGTH = 24; // SODIUM_CRYPTO_SECRETBOX_NONCEBYTES
     const OPENSSL_IV_LENGTH = 16;   // For AES-256-GCM
     const TAG_LENGTH = 16;          // Auth tag for GCM
     
@@ -95,7 +95,11 @@ class ITN_Encryption {
         if (function_exists('random_bytes')) {
             $salt = random_bytes(self::SALT_LENGTH);
         } else {
-            $salt = openssl_random_pseudo_bytes(self::SALT_LENGTH);
+            $crypto_strong = false;
+            $salt = openssl_random_pseudo_bytes(self::SALT_LENGTH, $crypto_strong);
+            if (!$crypto_strong) {
+                return ['success' => false, 'message' => 'Cannot generate cryptographically strong random bytes', 'method' => null];
+            }
         }
         
         // Derive key
