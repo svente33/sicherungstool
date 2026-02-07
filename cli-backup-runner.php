@@ -2,7 +2,23 @@
 /**
  * ITN Sicherung CLI Backup Runner
  * Wird direkt über PHP-CLI aufgerufen, umgeht alle Webserver-Timeouts
+ * 
+ * Usage:
+ *   php cli-backup-runner.php <run-id>           - Run with specific Run-ID
+ *   php cli-backup-runner.php --cron             - Cron mode (generates Run-ID)
  */
+
+// Parse command line arguments
+$cron_mode = false;
+$run_id = null;
+
+if (isset($argv[1])) {
+    if ($argv[1] === '--cron') {
+        $cron_mode = true;
+    } else {
+        $run_id = $argv[1];
+    }
+}
 
 // Finde WordPress
 $wp_load = dirname(__FILE__) . '/../../wp-load.php';
@@ -29,24 +45,15 @@ if (!file_exists($wp_load)) {
 define('DOING_CRON', true);
 require_once($wp_load);
 
-// Hole Run-ID aus Command-Line-Argumenten
-$run_id = isset($argv[1]) ? $argv[1] : null;
-
-if (!$run_id) {
-    error_log('ITN CLI Runner: Keine Run-ID übergeben');
-    exit(1);
-}
-
-error_log('ITN CLI Runner gestartet mit Run-ID: ' . $run_id);
-
 // Lade Plugin-Klassen
 require_once(dirname(__FILE__) . '/includes/helpers.php');
+require_once(dirname(__FILE__) . '/includes/class-itn-encryption.php');
 require_once(dirname(__FILE__) . '/includes/class-itn-backup.php');
 require_once(dirname(__FILE__) . '/includes/class-itn-schedule.php');
 require_once(dirname(__FILE__) . '/includes/class-itn-installer-generator.php');
 
 // Lade Einstellungen
-function itn_settings_defaults() {
+function itn_cli_settings_defaults() {
     return [
         'exclude_paths' => [],
         'ftp_enabled' => false,
@@ -86,17 +93,38 @@ function itn_settings_defaults() {
     ];
 }
 
+// Handle cron mode - generate Run-ID
+if ($cron_mode) {
+    $timestamp = current_time('timestamp');
+    $siteHost = preg_replace('/[^a-z0-9_-]/i', '_', parse_url(home_url(), PHP_URL_HOST));
+    $run_id = 'backup_' . date('Ymd_His', $timestamp) . '_' . $siteHost;
+    error_log('ITN CLI Runner: Cron-Modus - generierte Run-ID: ' . $run_id);
+}
+
+if (!$run_id) {
+    error_log('ITN CLI Runner: Keine Run-ID übergeben und kein --cron Modus');
+    exit(1);
+}
+
+error_log('ITN CLI Runner gestartet mit Run-ID: ' . $run_id);
+
 // Starte Backup
-$opts = array_merge(itn_settings_defaults(), get_option('itn_settings', []));
-$backup = new ITN_Backup($opts);
+$opts = array_merge(itn_cli_settings_defaults(), get_option('itn_settings', []));
 
-error_log('ITN CLI Runner: Starte Backup->run()...');
-$result = $backup->run($run_id);
-
-error_log('ITN CLI Runner: Backup fertig - ' . ($result['success'] ? 'SUCCESS' : 'FAILED'));
-error_log('ITN CLI Runner: Message: ' . ($result['message'] ?? 'keine Nachricht'));
-
-// Aufräumen
-delete_option('itn_backup_running');
-
-exit($result['success'] ? 0 : 1);
+try {
+    $backup = new ITN_Backup($opts);
+    error_log('ITN CLI Runner: Starte Backup->run()...');
+    $result = $backup->run($run_id);
+    
+    error_log('ITN CLI Runner: Backup fertig - ' . ($result['success'] ? 'SUCCESS' : 'FAILED'));
+    error_log('ITN CLI Runner: Message: ' . ($result['message'] ?? 'keine Nachricht'));
+    
+    // Aufräumen
+    delete_option('itn_backup_running');
+    
+    exit($result['success'] ? 0 : 1);
+} catch (Exception $e) {
+    error_log('ITN CLI Runner: EXCEPTION - ' . $e->getMessage());
+    delete_option('itn_backup_running');
+    exit(1);
+}

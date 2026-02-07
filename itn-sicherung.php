@@ -52,6 +52,7 @@ function itn_collect_environment_issues() {
     if (!class_exists('ZipArchive')) $warnings[] = 'PHP-Erweiterung ZipArchive fehlt. ZIP-Backups/Installer funktionieren nicht.';
     $required = [
         ITN_PLUGIN_DIR . 'includes/helpers.php' => 'Hilfsfunktionen',
+        ITN_PLUGIN_DIR . 'includes/class-itn-encryption.php' => 'Verschlüsselung',
         ITN_PLUGIN_DIR . 'includes/class-itn-backup.php' => 'Backup',
         ITN_PLUGIN_DIR . 'includes/class-itn-chunked-backup.php' => 'Chunked Backup',
         ITN_PLUGIN_DIR . 'includes/class-itn-installer-generator.php' => 'Installer-Generator',
@@ -99,6 +100,7 @@ $GLOBALS['itn_activation_warnings'] = [];
 
 $itn_ready = true;
 $itn_ready = itn_safe_require(ITN_PLUGIN_DIR . 'includes/helpers.php', 'Hilfsfunktionen') && $itn_ready;
+$itn_ready = itn_safe_require(ITN_PLUGIN_DIR . 'includes/class-itn-encryption.php', 'Verschlüsselung') && $itn_ready;
 $itn_ready = itn_safe_require(ITN_PLUGIN_DIR . 'includes/class-itn-backup.php', 'Backup') && $itn_ready;
 $itn_ready = itn_safe_require(ITN_PLUGIN_DIR . 'includes/class-itn-chunked-backup.php', 'Chunked Backup') && $itn_ready;
 $itn_ready = itn_safe_require(ITN_PLUGIN_DIR . 'includes/class-itn-installer-generator.php', 'Installer-Generator') && $itn_ready;
