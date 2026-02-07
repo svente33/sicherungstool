@@ -52,6 +52,7 @@ function itn_collect_environment_issues() {
     if (!class_exists('ZipArchive')) $warnings[] = 'PHP-Erweiterung ZipArchive fehlt. ZIP-Backups/Installer funktionieren nicht.';
     $required = [
         ITN_PLUGIN_DIR . 'includes/helpers.php' => 'Hilfsfunktionen',
+        ITN_PLUGIN_DIR . 'includes/class-itn-encryption.php' => 'Verschlüsselung',
         ITN_PLUGIN_DIR . 'includes/class-itn-backup.php' => 'Backup',
         ITN_PLUGIN_DIR . 'includes/class-itn-chunked-backup.php' => 'Chunked Backup',
         ITN_PLUGIN_DIR . 'includes/class-itn-installer-generator.php' => 'Installer-Generator',
@@ -99,6 +100,7 @@ $GLOBALS['itn_activation_warnings'] = [];
 
 $itn_ready = true;
 $itn_ready = itn_safe_require(ITN_PLUGIN_DIR . 'includes/helpers.php', 'Hilfsfunktionen') && $itn_ready;
+$itn_ready = itn_safe_require(ITN_PLUGIN_DIR . 'includes/class-itn-encryption.php', 'Verschlüsselung') && $itn_ready;
 $itn_ready = itn_safe_require(ITN_PLUGIN_DIR . 'includes/class-itn-backup.php', 'Backup') && $itn_ready;
 $itn_ready = itn_safe_require(ITN_PLUGIN_DIR . 'includes/class-itn-chunked-backup.php', 'Chunked Backup') && $itn_ready;
 $itn_ready = itn_safe_require(ITN_PLUGIN_DIR . 'includes/class-itn-installer-generator.php', 'Installer-Generator') && $itn_ready;
@@ -149,6 +151,16 @@ function itn_settings_defaults() {
 /* Admin-Hinweise */
 add_action('admin_notices', function () {
     if (!current_user_can('manage_options')) return;
+
+    // Zeige Verschlüsselungsfehler, falls vorhanden
+    $enc_error = get_transient('itn_encryption_error');
+    if ($enc_error) {
+        echo '<div class="notice notice-error is-dismissible">';
+        echo '<p><strong>ITN Sicherung - Verschlüsselungsfehler:</strong> ' . esc_html($enc_error) . '</p>';
+        echo '<p>Bitte prüfen Sie die Verschlüsselungseinstellungen oder deaktivieren Sie die Verschlüsselung.</p>';
+        echo '</div>';
+        delete_transient('itn_encryption_error');
+    }
 
     $current = itn_collect_environment_issues();
     $last = get_option('itn_last_activation_issues');
@@ -710,7 +722,18 @@ class ITNSicherungPlugin {
         $new['notify_email'] = sanitize_email($_POST['notify_email'] ?? '');
         $new['zip_encrypt_enabled']  = isset($_POST['zip_encrypt_enabled']);
         $posted_zip_pw = isset($_POST['zip_encrypt_password']) ? trim((string)$_POST['zip_encrypt_password']) : '';
-        if ($posted_zip_pw !== '') {
+        
+        // Validate password if encryption is enabled
+        if ($new['zip_encrypt_enabled'] && $posted_zip_pw !== '') {
+            $pw_check = ITN_Encryption::validate_password($posted_zip_pw);
+            if (!$pw_check['valid']) {
+                // Password validation failed - redirect with error
+                $notice = ['itn_notice'=>'error','itn_msg'=>urlencode('Verschlüsselungspasswort ungültig: ' . $pw_check['message'])];
+                wp_redirect(add_query_arg(array_merge(['page' => 'itn-sicherung', 'tab' => 'settings'], $notice), admin_url('admin.php')));
+                exit;
+            }
+            $new['zip_encrypt_password'] = $posted_zip_pw;
+        } elseif ($posted_zip_pw !== '') {
             $new['zip_encrypt_password'] = $posted_zip_pw;
         }
         $new['restore_drop_db'] = isset($_POST['restore_drop_db']);

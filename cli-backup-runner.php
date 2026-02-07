@@ -41,6 +41,7 @@ error_log('ITN CLI Runner gestartet mit Run-ID: ' . $run_id);
 
 // Lade Plugin-Klassen
 require_once(dirname(__FILE__) . '/includes/helpers.php');
+require_once(dirname(__FILE__) . '/includes/class-itn-encryption.php');
 require_once(dirname(__FILE__) . '/includes/class-itn-backup.php');
 require_once(dirname(__FILE__) . '/includes/class-itn-schedule.php');
 require_once(dirname(__FILE__) . '/includes/class-itn-installer-generator.php');
