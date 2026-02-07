@@ -98,6 +98,125 @@ function normalize_path(string $p): string {
     return rtrim($p, '/');
 }
 
+// ------------------------------------------------------------
+// Encryption Helper Functions (for container decryption)
+// ------------------------------------------------------------
+const ITN_ENC_MAGIC = 'ITNENC01';
+const ITN_ENC_VERSION = 1;
+const ITN_ENC_SALT_LENGTH = 16;
+const ITN_ENC_IV_LENGTH = 12;
+const ITN_ENC_TAG_LENGTH = 16;
+const ITN_ENC_PBKDF2_ITERATIONS = 100000;
+
+/**
+ * Check if a file is an encrypted container
+ */
+function is_encrypted_container(string $file_path): bool {
+    if (!file_exists($file_path) || !is_readable($file_path)) {
+        return false;
+    }
+    
+    $handle = @fopen($file_path, 'rb');
+    if (!$handle) {
+        return false;
+    }
+    
+    $magic = fread($handle, 8);
+    fclose($handle);
+    
+    return $magic === ITN_ENC_MAGIC;
+}
+
+/**
+ * Decrypt a container-encrypted file
+ * Returns the path to the decrypted file or throws an exception
+ */
+function decrypt_container(string $enc_path, string $password): string {
+    if (!function_exists('openssl_decrypt') || !function_exists('openssl_pbkdf2')) {
+        throw new Exception('OpenSSL-Funktionen nicht verfügbar');
+    }
+    
+    if (!in_array('aes-256-gcm', openssl_get_cipher_methods())) {
+        throw new Exception('AES-256-GCM nicht verfügbar');
+    }
+    
+    // Read container
+    $container = @file_get_contents($enc_path);
+    if ($container === false) {
+        throw new Exception('Konnte verschlüsselte Datei nicht lesen');
+    }
+    
+    // Verify minimum size
+    $header_size = 8 + 1 + 16 + 4 + 12 + 16; // MAGIC + VERSION + SALT + ITERATIONS + IV + TAG
+    if (strlen($container) < $header_size) {
+        throw new Exception('Ungültige Container-Datei (zu klein)');
+    }
+    
+    // Parse header
+    $pos = 0;
+    
+    // Check magic
+    $magic = substr($container, $pos, 8);
+    $pos += 8;
+    if ($magic !== ITN_ENC_MAGIC) {
+        throw new Exception('Ungültiger Container-Header');
+    }
+    
+    // Read version
+    $version = unpack('C', substr($container, $pos, 1))[1];
+    $pos += 1;
+    if ($version !== ITN_ENC_VERSION) {
+        throw new Exception('Nicht unterstützte Container-Version: ' . $version);
+    }
+    
+    // Read salt
+    $salt = substr($container, $pos, ITN_ENC_SALT_LENGTH);
+    $pos += ITN_ENC_SALT_LENGTH;
+    
+    // Read iterations
+    $iterations = unpack('N', substr($container, $pos, 4))[1];
+    $pos += 4;
+    
+    // Read IV
+    $iv = substr($container, $pos, ITN_ENC_IV_LENGTH);
+    $pos += ITN_ENC_IV_LENGTH;
+    
+    // Read tag
+    $tag = substr($container, $pos, ITN_ENC_TAG_LENGTH);
+    $pos += ITN_ENC_TAG_LENGTH;
+    
+    // Read ciphertext
+    $ciphertext = substr($container, $pos);
+    
+    // Derive decryption key
+    $key = openssl_pbkdf2($password, $salt, 32, $iterations, 'sha256');
+    if ($key === false) {
+        throw new Exception('Schlüsselableitung fehlgeschlagen');
+    }
+    
+    // Decrypt data
+    $plaintext = openssl_decrypt(
+        $ciphertext,
+        'aes-256-gcm',
+        $key,
+        OPENSSL_RAW_DATA,
+        $iv,
+        $tag
+    );
+    
+    if ($plaintext === false) {
+        throw new Exception('Entschlüsselung fehlgeschlagen (falsches Passwort oder beschädigte Datei)');
+    }
+    
+    // Write decrypted data to temporary file
+    $dec_path = dirname($enc_path) . '/' . basename($enc_path, '.enc');
+    if (@file_put_contents($dec_path, $plaintext) === false) {
+        throw new Exception('Konnte entschlüsselte Datei nicht schreiben');
+    }
+    
+    return $dec_path;
+}
+
 /**
  * Kopiert rekursiv Inhalte von $src nach $dst.
  * - Excludes sind relative Namen (Datei/Ordner) auf erster Ebene UND in Unterordnern (basename-Vergleich).
@@ -478,6 +597,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'extra
             throw new Exception('Keine ZIP-Datei angegeben');
         }
 
+        // Check if file is an encrypted container (.enc)
+        $is_container = is_encrypted_container($zip_file_path);
+        if ($is_container) {
+            log_message('Verschlüsselter Container erkannt');
+            
+            if ($zip_password === '') {
+                throw new Exception('Passwort erforderlich für verschlüsseltes Backup');
+            }
+            
+            log_message('Entschlüssele Container...');
+            $zip_file_path = decrypt_container($zip_file_path, $zip_password);
+            log_message('Container erfolgreich entschlüsselt');
+        }
+
         if (!class_exists('ZipArchive')) {
             throw new Exception('ZipArchive fehlt (PHP Extension "zip" nicht aktiv)');
         }
@@ -490,14 +623,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'extra
             throw new Exception('ZIP öffnen fehlgeschlagen (Code ' . $openRes . ')');
         }
 
-        if ($zip_password !== '') {
+        // If not a container but password provided, assume ZipArchive encryption
+        if (!$is_container && $zip_password !== '') {
             $zip->setPassword($zip_password);
         }
 
         log_message('Entpacke ' . $zip->numFiles . ' Dateien nach ' . $TEMP_DIR);
 
         // Teste Passwort/Lesbarkeit: versuche eine Datei zu lesen, falls verschlüsselt
-        if ($zip->numFiles > 0 && $zip_password !== '') {
+        if ($zip->numFiles > 0 && $zip_password !== '' && !$is_container) {
             $stat = $zip->statIndex(0);
             if ($stat && isset($stat['name'])) {
                 $test = $zip->getFromName($stat['name']);
