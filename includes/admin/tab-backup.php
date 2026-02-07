@@ -28,6 +28,7 @@ $issues = itn_collect_environment_issues();
                     <tr>
                         <th><?php _e('Dateiname', 'itn-sicherung'); ?></th>
                         <th><?php _e('Größe', 'itn-sicherung'); ?></th>
+                        <th><?php _e('Verschlüsselung', 'itn-sicherung'); ?></th>
                         <th><?php _e('Datum', 'itn-sicherung'); ?></th>
                         <th><?php _e('Aktionen', 'itn-sicherung'); ?></th>
                     </tr>
@@ -37,7 +38,39 @@ $issues = itn_collect_environment_issues();
                     $size = ITN_Helpers::format_bytes(filesize($file));
                     $date = ITN_Helpers::format_datetime(filemtime($file));
                     $zip_basename = basename($file);
+                    $is_enc = (substr($file, -4) === '.enc');
+                    
+                    // For .enc files, try to read encryption info from .report.json
+                    $encryption_info = '';
+                    if ($is_enc) {
+                        $report_file = str_replace('.zip.enc', '.report.json', $file);
+                        if (file_exists($report_file)) {
+                            $report_json = @file_get_contents($report_file);
+                            $report_data = $report_json ? @json_decode($report_json, true) : null;
+                            if ($report_data && isset($report_data['encryption_method'])) {
+                                if ($report_data['encryption_method'] === 'php-openssl-aes-256-gcm') {
+                                    $encryption_info = '🔒 AES-256-GCM Container';
+                                } else {
+                                    $encryption_info = '🔒 Verschlüsselt';
+                                }
+                            } else {
+                                // Log warning if report file is invalid
+                                error_log('ITN: Failed to parse report file: ' . $report_file);
+                                $encryption_info = '🔒 Verschlüsselt (.enc)';
+                            }
+                        } else {
+                            $encryption_info = '🔒 Verschlüsselt (.enc)';
+                        }
+                    } else {
+                        // For .zip files, check if they have ZipArchive encryption
+                        // This is harder to detect, so we assume unencrypted unless we have metadata
+                        $encryption_info = '—';
+                    }
+                    
                     $installer_name = 'installer-' . basename($file, '.zip') . '.php';
+                    if ($is_enc) {
+                        $installer_name = 'installer-' . basename($file, '.zip.enc') . '.php';
+                    }
                     $installer_path = $backup_dir . '/' . $installer_name;
                     if (!file_exists($installer_path) && class_exists('ITN_Installer_Generator')) {
                         @ITN_Installer_Generator::write_installer_for_backup($file, $installer_path);
@@ -50,6 +83,7 @@ $issues = itn_collect_environment_issues();
                     <tr>
                         <td><strong><?php echo esc_html($zip_basename); ?></strong></td>
                         <td><?php echo esc_html($size); ?></td>
+                        <td><?php echo esc_html($encryption_info); ?></td>
                         <td><?php echo esc_html($date); ?></td>
                         <td class="itn-actions">
                             <a class="button button-small" href="<?php echo esc_url($dl_zip); ?>">
