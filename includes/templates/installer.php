@@ -188,6 +188,131 @@ function recursive_replace($search, $replace, $subject) {
     return $subject;
 }
 
+// ------------------------------------------------------------
+// Encryption/Decryption Functions (for encrypted containers)
+// ------------------------------------------------------------
+
+/**
+ * Check if file is an encrypted container
+ */
+function is_encrypted_container(string $path): bool {
+    if (!file_exists($path)) return false;
+    $handle = @fopen($path, 'rb');
+    if (!$handle) return false;
+    $header = fread($handle, 8);
+    fclose($handle);
+    return $header === 'ITNENC01';
+}
+
+/**
+ * Decrypt encrypted container file
+ * Returns path to decrypted temp file or throws exception
+ */
+function decrypt_container(string $container_path, string $password): string {
+    if (empty($password)) {
+        throw new Exception('Passwort erforderlich für verschlüsselte Backups');
+    }
+    
+    global $TEMP_DIR, $RESTORE_DIR;
+    
+    // Read container
+    $container = file_get_contents($container_path);
+    if ($container === false) {
+        throw new Exception('Container konnte nicht gelesen werden');
+    }
+    
+    $container_len = strlen($container);
+    $header = 'ITNENC01';
+    $header_len = 8;
+    $salt_len = 32;
+    
+    // Validate header
+    if ($container_len < $header_len || substr($container, 0, $header_len) !== $header) {
+        throw new Exception('Ungültiger verschlüsselter Container');
+    }
+    
+    // Extract salt
+    $pos = $header_len;
+    if ($container_len < $pos + $salt_len) {
+        throw new Exception('Container beschädigt: Salt fehlt');
+    }
+    $salt = substr($container, $pos, $salt_len);
+    $pos += $salt_len;
+    
+    $plaintext = false;
+    
+    // Try Sodium first (XSalsa20-Poly1305)
+    if (function_exists('sodium_crypto_secretbox_open') && function_exists('sodium_crypto_pwhash')) {
+        $nonce_len = 24; // SODIUM_CRYPTO_SECRETBOX_NONCEBYTES
+        if ($container_len >= $pos + $nonce_len) {
+            $nonce = substr($container, $pos, $nonce_len);
+            $ciphertext = substr($container, $pos + $nonce_len);
+            
+            // Derive key with Argon2id
+            try {
+                $key = sodium_crypto_pwhash(
+                    32, // SODIUM_CRYPTO_SECRETBOX_KEYBYTES
+                    $password,
+                    $salt,
+                    SODIUM_CRYPTO_PWHASH_OPSLIMIT_INTERACTIVE,
+                    SODIUM_CRYPTO_PWHASH_MEMLIMIT_INTERACTIVE
+                );
+                
+                $plaintext = sodium_crypto_secretbox_open($ciphertext, $nonce, $key);
+                sodium_memzero($key);
+                
+                if ($plaintext !== false) {
+                    log_message('Container mit Sodium entschlüsselt');
+                }
+            } catch (Throwable $e) {
+                log_message('Sodium decryption failed: ' . $e->getMessage());
+            }
+        }
+    }
+    
+    // Try OpenSSL if Sodium failed (AES-256-GCM)
+    if ($plaintext === false && function_exists('openssl_decrypt')) {
+        $iv_len = 16;
+        $tag_len = 16;
+        
+        if ($container_len >= $pos + $iv_len + $tag_len) {
+            $iv = substr($container, $pos, $iv_len);
+            $ciphertext_and_tag = substr($container, $pos + $iv_len);
+            $ciphertext = substr($ciphertext_and_tag, 0, -$tag_len);
+            $tag = substr($ciphertext_and_tag, -$tag_len);
+            
+            // Derive key with PBKDF2
+            $key = hash_pbkdf2('sha256', $password, $salt, 100000, 32, true);
+            
+            $plaintext = openssl_decrypt(
+                $ciphertext,
+                'aes-256-gcm',
+                $key,
+                OPENSSL_RAW_DATA,
+                $iv,
+                $tag
+            );
+            
+            if ($plaintext !== false) {
+                log_message('Container mit OpenSSL entschlüsselt');
+            }
+        }
+    }
+    
+    if ($plaintext === false) {
+        throw new Exception('Entschlüsselung fehlgeschlagen: falsches Passwort oder beschädigter Container');
+    }
+    
+    // Write decrypted file to temp location
+    $decrypted_path = $RESTORE_DIR . '/decrypted_backup_' . time() . '.zip';
+    if (file_put_contents($decrypted_path, $plaintext) === false) {
+        throw new Exception('Konnte entschlüsselte Datei nicht schreiben');
+    }
+    
+    log_message('Entschlüsselte Datei: ' . $decrypted_path . ' (' . strlen($plaintext) . ' bytes)');
+    return $decrypted_path;
+}
+
 /**
  * WordPress Search/Replace DB
  * - Nur Tabellen des Präfix (falls vorhanden) oder alle (Fallback)
@@ -483,6 +608,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'extra
         }
 
         ensure_dir($TEMP_DIR);
+        
+        // Check if container is encrypted and decrypt if needed
+        $is_encrypted = is_encrypted_container($zip_file_path);
+        $decrypted_file = null;
+        
+        if ($is_encrypted) {
+            log_message('Verschlüsselter Container erkannt - starte Entschlüsselung');
+            try {
+                $decrypted_file = decrypt_container($zip_file_path, $zip_password);
+                $zip_file_path = $decrypted_file;
+                log_message('Entschlüsselung erfolgreich');
+            } catch (Exception $e) {
+                throw new Exception('Entschlüsselung fehlgeschlagen: ' . $e->getMessage());
+            }
+        }
 
         $zip = new ZipArchive();
         $openRes = $zip->open($zip_file_path);
@@ -515,6 +655,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'extra
 
         $zip->close();
         log_message('Entpacken erfolgreich');
+        
+        // Clean up decrypted temp file if it was created
+        if ($decrypted_file && file_exists($decrypted_file)) {
+            @unlink($decrypted_file);
+            log_message('Temporäre entschlüsselte Datei gelöscht');
+        }
 
         // Meta
         $meta = [];
