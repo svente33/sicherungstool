@@ -98,6 +98,208 @@ function normalize_path(string $p): string {
     return rtrim($p, '/');
 }
 
+// ------------------------------------------------------------
+// Encryption Support (v1 GCM and v2 Streaming)
+// ------------------------------------------------------------
+function detect_encrypted_container(string $file_path): array {
+    if (!file_exists($file_path) || !is_readable($file_path)) {
+        return ['is_encrypted' => false, 'version' => null];
+    }
+    
+    $fp = fopen($file_path, 'rb');
+    if (!$fp) {
+        return ['is_encrypted' => false, 'version' => null];
+    }
+    
+    $magic = fread($fp, 4);
+    fclose($fp);
+    
+    if ($magic === "ITN\x01") {
+        return ['is_encrypted' => true, 'version' => 1];
+    } elseif ($magic === "ITN\x02") {
+        return ['is_encrypted' => true, 'version' => 2];
+    }
+    
+    return ['is_encrypted' => false, 'version' => null];
+}
+
+function decrypt_container_v1(string $source_path, string $dest_path, string $password): array {
+    if (!file_exists($source_path)) {
+        return ['success' => false, 'message' => 'Source file not found'];
+    }
+    
+    $data = file_get_contents($source_path);
+    if ($data === false) {
+        return ['success' => false, 'message' => 'Cannot read source file'];
+    }
+    
+    // V1 format: MAGIC(4) + VERSION(1) + SALT(16) + IV(12) + TAG(16) + CIPHERTEXT
+    $header_size = 4 + 1 + 16 + 12 + 16;
+    if (strlen($data) < $header_size) {
+        return ['success' => false, 'message' => 'File too small to be valid v1 container'];
+    }
+    
+    $pos = 0;
+    $magic = substr($data, $pos, 4); $pos += 4;
+    if ($magic !== "ITN\x01") {
+        return ['success' => false, 'message' => 'Invalid v1 magic'];
+    }
+    
+    $version = ord(substr($data, $pos, 1)); $pos += 1;
+    $salt = substr($data, $pos, 16); $pos += 16;
+    $iv = substr($data, $pos, 12); $pos += 12;
+    $tag = substr($data, $pos, 16); $pos += 16;
+    $ciphertext = substr($data, $pos);
+    
+    // Derive key
+    $key = openssl_pbkdf2($password, $salt, 32, 100000, 'sha256');
+    
+    // Decrypt
+    $plaintext = openssl_decrypt(
+        $ciphertext,
+        'aes-256-gcm',
+        $key,
+        OPENSSL_RAW_DATA,
+        $iv,
+        $tag
+    );
+    
+    if ($plaintext === false) {
+        return ['success' => false, 'message' => 'Decryption failed - wrong password or corrupted file'];
+    }
+    
+    if (file_put_contents($dest_path, $plaintext) === false) {
+        return ['success' => false, 'message' => 'Cannot write decrypted file'];
+    }
+    
+    return ['success' => true, 'message' => 'File decrypted successfully (v1)', 'size' => strlen($plaintext)];
+}
+
+function decrypt_container_v2(string $source_path, string $dest_path, string $password): array {
+    if (!file_exists($source_path) || !is_readable($source_path)) {
+        return ['success' => false, 'message' => 'Source file not readable'];
+    }
+    
+    try {
+        $fp_in = fopen($source_path, 'rb');
+        if (!$fp_in) {
+            return ['success' => false, 'message' => 'Cannot open encrypted file'];
+        }
+        
+        // Read and verify header
+        $magic = fread($fp_in, 4);
+        if ($magic !== "ITN\x02") {
+            fclose($fp_in);
+            return ['success' => false, 'message' => 'Invalid container magic or version'];
+        }
+        
+        $version = ord(fread($fp_in, 1));
+        if ($version !== 2) {
+            fclose($fp_in);
+            return ['success' => false, 'message' => 'Unsupported container version'];
+        }
+        
+        $salt = fread($fp_in, 16);
+        $iterations_packed = fread($fp_in, 4);
+        $iterations = unpack('N', $iterations_packed)[1];
+        $iv = fread($fp_in, 16);
+        
+        // Derive keys
+        $key_material = openssl_pbkdf2($password, $salt, 64, $iterations, 'sha256');
+        $enc_key = substr($key_material, 0, 32);
+        $hmac_key = substr($key_material, 32, 32);
+        
+        // Read HMAC from end of file
+        $file_size = filesize($source_path);
+        $ciphertext_size = $file_size - 4 - 1 - 16 - 4 - 16 - 32;
+        
+        fseek($fp_in, -32, SEEK_END);
+        $stored_hmac = fread($fp_in, 32);
+        
+        // Verify HMAC
+        fseek($fp_in, 0, SEEK_SET);
+        $hmac_ctx = hash_init('sha256', HASH_HMAC, $hmac_key);
+        
+        // Hash header
+        $header_data = fread($fp_in, 4 + 1 + 16 + 4 + 16);
+        hash_update($hmac_ctx, $header_data);
+        
+        // Hash ciphertext
+        $remaining = $ciphertext_size;
+        $chunk_size = 2097152; // 2MB
+        while ($remaining > 0) {
+            $to_read = min($remaining, $chunk_size);
+            $data = fread($fp_in, $to_read);
+            hash_update($hmac_ctx, $data);
+            $remaining -= strlen($data);
+        }
+        
+        $computed_hmac = hash_final($hmac_ctx, true);
+        
+        if (!hash_equals($computed_hmac, $stored_hmac)) {
+            fclose($fp_in);
+            return ['success' => false, 'message' => 'HMAC verification failed - file may be corrupted or tampered'];
+        }
+        
+        // Now decrypt
+        fseek($fp_in, 4 + 1 + 16 + 4 + 16, SEEK_SET);
+        
+        $fp_out = fopen($dest_path, 'wb');
+        if (!$fp_out) {
+            fclose($fp_in);
+            return ['success' => false, 'message' => 'Cannot create output file'];
+        }
+        
+        $processed = 0;
+        
+        while ($processed < $ciphertext_size) {
+            $to_read = min($chunk_size + 16, $ciphertext_size - $processed);
+            $ciphertext = fread($fp_in, $to_read);
+            
+            if ($ciphertext === false || $ciphertext === '') {
+                break;
+            }
+            
+            $plaintext = openssl_decrypt(
+                $ciphertext,
+                'aes-256-cbc',
+                $enc_key,
+                OPENSSL_RAW_DATA,
+                $iv
+            );
+            
+            if ($plaintext === false) {
+                fclose($fp_in);
+                fclose($fp_out);
+                @unlink($dest_path);
+                return ['success' => false, 'message' => 'Decryption failed'];
+            }
+            
+            fwrite($fp_out, $plaintext);
+            
+            // Update IV for next chunk
+            if (strlen($ciphertext) >= 16) {
+                $iv = substr($ciphertext, -16);
+            }
+            
+            $processed += strlen($ciphertext);
+        }
+        
+        fclose($fp_in);
+        fclose($fp_out);
+        
+        $output_size = filesize($dest_path);
+        
+        return ['success' => true, 'message' => 'File decrypted successfully (v2)', 'size' => $output_size];
+        
+    } catch (Exception $e) {
+        if (isset($fp_in) && is_resource($fp_in)) fclose($fp_in);
+        if (isset($fp_out) && is_resource($fp_out)) fclose($fp_out);
+        @unlink($dest_path);
+        return ['success' => false, 'message' => 'Exception: ' . $e->getMessage()];
+    }
+}
+
 /**
  * Kopiert rekursiv Inhalte von $src nach $dst.
  * - Excludes sind relative Namen (Datei/Ordner) auf erster Ebene UND in Unterordnern (basename-Vergleich).
@@ -381,7 +583,7 @@ function sql_import_file(mysqli $mysqli, string $file): void {
 // ------------------------------------------------------------
 // WordPress-config Generator (safer, inkl. FS_METHOD, WP_HOME/SITEURL optional)
 // ------------------------------------------------------------
-function build_wp_config(array $db, string $absolutePath, ?string $homeUrl = null, ?string $siteUrl = null): string {
+function build_wp_config(array $db, string $absolutePath, ?string $homeUrl = null, ?string $siteUrl = null, bool $debugMode = false): string {
     $abs = rtrim(str_replace('\\', '/', $absolutePath), '/') . '/';
 
     // Optional URL-Defines helfen, wenn optionen inkonsistent sind / Migration hakt
@@ -396,6 +598,14 @@ function build_wp_config(array $db, string $absolutePath, ?string $homeUrl = nul
     // Häufige Ursache für "kritische Fehler": falsche FS Rechte -> setze direct, wenn möglich
     // (kann man später entfernen)
     $fsMethod = "define('FS_METHOD', 'direct');\n";
+    
+    // Debug Mode
+    $debugDefines = '';
+    if ($debugMode) {
+        $debugDefines = "define('WP_DEBUG', true);\ndefine('WP_DEBUG_LOG', true);\ndefine('WP_DEBUG_DISPLAY', false);\n";
+    } else {
+        $debugDefines = "// Debug (bei Bedarf aktivieren)\n// define('WP_DEBUG', true);\n// define('WP_DEBUG_LOG', true);\n// define('WP_DEBUG_DISPLAY', false);\n";
+    }
 
     return "<?php
 /**
@@ -425,10 +635,7 @@ define('NONCE_SALT',       '" . safe_password() . "');
 
 \$table_prefix = '" . addslashes((string)$db['prefix']) . "';
 
-// Debug (bei Bedarf aktivieren)
-// define('WP_DEBUG', true);
-// define('WP_DEBUG_LOG', true);
-// define('WP_DEBUG_DISPLAY', false);
+" . $debugDefines . "
 
 if (!defined('ABSPATH')) {
     define('ABSPATH', '" . addslashes($abs) . "');
@@ -478,15 +685,50 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'extra
             throw new Exception('Keine ZIP-Datei angegeben');
         }
 
+        // Check if file is an encrypted container
+        $container_info = detect_encrypted_container($zip_file_path);
+        $actual_zip_path = $zip_file_path;
+        $temp_decrypted_zip = null;
+        
+        if ($container_info['is_encrypted']) {
+            if ($zip_password === '') {
+                throw new Exception('Datei ist verschlüsselt, aber kein Passwort angegeben');
+            }
+            
+            log_message('Verschlüsselter Container erkannt (Version ' . $container_info['version'] . ')');
+            
+            // Decrypt to temporary file
+            $temp_decrypted_zip = $TEMP_DIR . '_decrypt_' . time() . '.zip';
+            
+            if ($container_info['version'] === 1) {
+                $decrypt_result = decrypt_container_v1($zip_file_path, $temp_decrypted_zip, $zip_password);
+            } elseif ($container_info['version'] === 2) {
+                $decrypt_result = decrypt_container_v2($zip_file_path, $temp_decrypted_zip, $zip_password);
+            } else {
+                throw new Exception('Unbekannte Container-Version: ' . $container_info['version']);
+            }
+            
+            if (!$decrypt_result['success']) {
+                @unlink($temp_decrypted_zip);
+                throw new Exception('Entschlüsselung fehlgeschlagen: ' . $decrypt_result['message']);
+            }
+            
+            log_message('Container erfolgreich entschlüsselt (' . $decrypt_result['message'] . ')');
+            $actual_zip_path = $temp_decrypted_zip;
+            $zip_password = ''; // Already decrypted, no password needed for ZipArchive
+        }
+
         if (!class_exists('ZipArchive')) {
+            if ($temp_decrypted_zip) @unlink($temp_decrypted_zip);
             throw new Exception('ZipArchive fehlt (PHP Extension "zip" nicht aktiv)');
         }
 
         ensure_dir($TEMP_DIR);
 
         $zip = new ZipArchive();
-        $openRes = $zip->open($zip_file_path);
+        $openRes = $zip->open($actual_zip_path);
         if ($openRes !== true) {
+            if ($temp_decrypted_zip) @unlink($temp_decrypted_zip);
             throw new Exception('ZIP öffnen fehlgeschlagen (Code ' . $openRes . ')');
         }
 
@@ -503,6 +745,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'extra
                 $test = $zip->getFromName($stat['name']);
                 if ($test === false) {
                     $zip->close();
+                    if ($temp_decrypted_zip) @unlink($temp_decrypted_zip);
                     throw new Exception('ZIP-Passwort falsch oder Datei kann nicht gelesen werden');
                 }
             }
@@ -510,10 +753,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'extra
 
         if (!$zip->extractTo($TEMP_DIR)) {
             $zip->close();
+            if ($temp_decrypted_zip) @unlink($temp_decrypted_zip);
             throw new Exception('Entpacken fehlgeschlagen');
         }
 
         $zip->close();
+        
+        // Clean up temporary decrypted ZIP
+        if ($temp_decrypted_zip && file_exists($temp_decrypted_zip)) {
+            @unlink($temp_decrypted_zip);
+            log_message('Temporäre entschlüsselte ZIP-Datei aufgeräumt');
+        }
+        
         log_message('Entpacken erfolgreich');
 
         // Meta
@@ -662,6 +913,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'resto
         log_message('Neue URL: ' . $new_url);
 
         $tempDir = (string)$_SESSION['temp_dir'];
+        $enable_debug = !empty($_POST['enable_debug']);
+        $deactivate_plugins = !empty($_POST['deactivate_plugins']);
 
         // 1) Dateien kopieren
         // wp-config.php NICHT aus Backup kopieren; wir erzeugen es neu
@@ -675,11 +928,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'resto
         $absPath = realpath($RESTORE_DIR) ?: $RESTORE_DIR;
 
         // Optional: für Stabilität direkt definieren (kann später entfernt werden)
-        $config = build_wp_config($db, $absPath, $new_url, $new_url);
+        $config = build_wp_config($db, $absPath, $new_url, $new_url, $enable_debug);
         if (@file_put_contents($RESTORE_DIR . '/wp-config.php', $config) === false) {
             throw new Exception('Kann wp-config.php nicht schreiben (Rechte?)');
         }
-        log_message('wp-config.php erstellt');
+        log_message('wp-config.php erstellt' . ($enable_debug ? ' (Debug-Modus aktiviert)' : ''));
 
         // 3) DB-Migration
         $meta = $_SESSION['meta'] ?? [];
@@ -775,8 +1028,142 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'resto
                 $empty = serialize([]);
                 $stmt = $mysqli->prepare("UPDATE `{$optTable}` SET option_value=? WHERE option_name='active_plugins'");
                 if ($stmt) { $stmt->bind_param('s', $empty); $stmt->execute(); $stmt->close(); }
+            } elseif ($deactivate_plugins && is_array($active)) {
+                log_message('Plugins werden deaktiviert (Benutzer-Option)');
+                $empty = serialize([]);
+                $stmt = $mysqli->prepare("UPDATE `{$optTable}` SET option_value=? WHERE option_name='active_plugins'");
+                if ($stmt) { $stmt->bind_param('s', $empty); $stmt->execute(); $stmt->close(); }
             } else {
                 log_message('active_plugins OK (wird nicht überschrieben)');
+            }
+            
+            // 4a) Fix user roles and capabilities
+            // Ensure {prefix}user_roles option is valid
+            $userRolesTable = $prefix . 'options';
+            $res = $mysqli->query("SELECT option_value FROM `{$userRolesTable}` WHERE option_name='{$prefix}user_roles' LIMIT 1");
+            if ($res && ($r = $res->fetch_row())) {
+                $roles_raw = (string)($r[0] ?? '');
+                $roles = safe_unserialize($roles_raw);
+                if (!is_array($roles) || empty($roles['administrator'])) {
+                    log_message('user_roles ist korrupt oder fehlt administrator -> repariere minimal');
+                    $default_roles = [
+                        'administrator' => [
+                            'name' => 'Administrator',
+                            'capabilities' => [
+                                'switch_themes' => true,
+                                'edit_themes' => true,
+                                'activate_plugins' => true,
+                                'edit_plugins' => true,
+                                'edit_users' => true,
+                                'edit_files' => true,
+                                'manage_options' => true,
+                                'moderate_comments' => true,
+                                'manage_categories' => true,
+                                'manage_links' => true,
+                                'upload_files' => true,
+                                'import' => true,
+                                'unfiltered_html' => true,
+                                'edit_posts' => true,
+                                'edit_others_posts' => true,
+                                'edit_published_posts' => true,
+                                'publish_posts' => true,
+                                'edit_pages' => true,
+                                'read' => true,
+                                'level_10' => true,
+                                'level_9' => true,
+                                'level_8' => true,
+                                'level_7' => true,
+                                'level_6' => true,
+                                'level_5' => true,
+                                'level_4' => true,
+                                'level_3' => true,
+                                'level_2' => true,
+                                'level_1' => true,
+                                'level_0' => true,
+                                'edit_others_pages' => true,
+                                'edit_published_pages' => true,
+                                'publish_pages' => true,
+                                'delete_pages' => true,
+                                'delete_others_pages' => true,
+                                'delete_published_pages' => true,
+                                'delete_posts' => true,
+                                'delete_others_posts' => true,
+                                'delete_published_posts' => true,
+                                'delete_private_posts' => true,
+                                'edit_private_posts' => true,
+                                'read_private_posts' => true,
+                                'delete_private_pages' => true,
+                                'edit_private_pages' => true,
+                                'read_private_pages' => true,
+                            ]
+                        ],
+                        'editor' => ['name' => 'Editor', 'capabilities' => ['moderate_comments' => true, 'manage_categories' => true, 'manage_links' => true, 'upload_files' => true, 'unfiltered_html' => true, 'edit_posts' => true, 'edit_others_posts' => true, 'edit_published_posts' => true, 'publish_posts' => true, 'edit_pages' => true, 'read' => true, 'level_7' => true, 'level_6' => true, 'level_5' => true, 'level_4' => true, 'level_3' => true, 'level_2' => true, 'level_1' => true, 'level_0' => true, 'edit_others_pages' => true, 'edit_published_pages' => true, 'publish_pages' => true, 'delete_pages' => true, 'delete_others_pages' => true, 'delete_published_pages' => true, 'delete_posts' => true, 'delete_others_posts' => true, 'delete_published_posts' => true, 'delete_private_posts' => true, 'edit_private_posts' => true, 'read_private_posts' => true, 'delete_private_pages' => true, 'edit_private_pages' => true, 'read_private_pages' => true]],
+                        'author' => ['name' => 'Author', 'capabilities' => ['upload_files' => true, 'edit_posts' => true, 'edit_published_posts' => true, 'publish_posts' => true, 'read' => true, 'level_2' => true, 'level_1' => true, 'level_0' => true, 'delete_posts' => true, 'delete_published_posts' => true]],
+                        'contributor' => ['name' => 'Contributor', 'capabilities' => ['edit_posts' => true, 'read' => true, 'level_1' => true, 'level_0' => true, 'delete_posts' => true]],
+                        'subscriber' => ['name' => 'Subscriber', 'capabilities' => ['read' => true, 'level_0' => true]]
+                    ];
+                    $fixed_roles = serialize($default_roles);
+                    $stmt = $mysqli->prepare("UPDATE `{$userRolesTable}` SET option_value=? WHERE option_name='{$prefix}user_roles'");
+                    if ($stmt) { $stmt->bind_param('s', $fixed_roles); $stmt->execute(); $stmt->close(); }
+                }
+            }
+            
+            // Fix admin user capabilities
+            $usermeta_table = $prefix . 'usermeta';
+            $users_table = $prefix . 'users';
+            
+            // Find admin user (usually ID 1 or username 'admin')
+            $admin_id = null;
+            $res = $mysqli->query("SELECT ID FROM `{$users_table}` WHERE ID=1 OR user_login='admin' ORDER BY ID ASC LIMIT 1");
+            if ($res && ($r = $res->fetch_row())) {
+                $admin_id = (int)$r[0];
+            }
+            
+            if ($admin_id) {
+                log_message("Prüfe/Repariere Capabilities für User ID {$admin_id}");
+                
+                // Check if {prefix}capabilities exists
+                $cap_key = $prefix . 'capabilities';
+                $res = $mysqli->query("SELECT meta_value FROM `{$usermeta_table}` WHERE user_id={$admin_id} AND meta_key='{$cap_key}' LIMIT 1");
+                $has_cap = false;
+                $cap_value = '';
+                if ($res && ($r = $res->fetch_row())) {
+                    $cap_value = (string)($r[0] ?? '');
+                    $cap_data = safe_unserialize($cap_value);
+                    if (is_array($cap_data) && isset($cap_data['administrator'])) {
+                        $has_cap = true;
+                    }
+                }
+                
+                if (!$has_cap) {
+                    log_message("User {$admin_id} hat keine {$cap_key} oder ist korrupt -> repariere");
+                    // Check if old prefix exists (e.g., wp_capabilities when prefix is different)
+                    $old_cap_res = $mysqli->query("SELECT meta_key, meta_value FROM `{$usermeta_table}` WHERE user_id={$admin_id} AND meta_key LIKE '%capabilities' AND meta_key != '{$cap_key}' LIMIT 1");
+                    if ($old_cap_res && ($old_r = $old_cap_res->fetch_row())) {
+                        // Migrate from old key
+                        $old_value = (string)($old_r[1] ?? '');
+                        log_message("Migriere alte capabilities von {$old_r[0]} zu {$cap_key}");
+                        $stmt = $mysqli->prepare("INSERT INTO `{$usermeta_table}` (user_id, meta_key, meta_value) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE meta_value=?");
+                        if ($stmt) { $stmt->bind_param('isss', $admin_id, $cap_key, $old_value, $old_value); $stmt->execute(); $stmt->close(); }
+                    } else {
+                        // Create new administrator capability
+                        $admin_cap = serialize(['administrator' => true]);
+                        $stmt = $mysqli->prepare("INSERT INTO `{$usermeta_table}` (user_id, meta_key, meta_value) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE meta_value=?");
+                        if ($stmt) { $stmt->bind_param('isss', $admin_id, $cap_key, $admin_cap, $admin_cap); $stmt->execute(); $stmt->close(); }
+                    }
+                }
+                
+                // Ensure user_level exists
+                $level_key = $prefix . 'user_level';
+                $res = $mysqli->query("SELECT meta_value FROM `{$usermeta_table}` WHERE user_id={$admin_id} AND meta_key='{$level_key}' LIMIT 1");
+                if (!$res || $res->num_rows === 0) {
+                    log_message("User {$admin_id} hat keine {$level_key} -> setze auf 10");
+                    $level_10 = '10';
+                    $stmt = $mysqli->prepare("INSERT INTO `{$usermeta_table}` (user_id, meta_key, meta_value) VALUES (?, ?, ?)");
+                    if ($stmt) { $stmt->bind_param('iss', $admin_id, $level_key, $level_10); $stmt->execute(); $stmt->close(); }
+                }
+            } else {
+                log_message('WARN: Kein Admin-User (ID 1 oder user_login=admin) gefunden');
             }
 
             // Optional: template/stylesheet prüfen (Theme)
@@ -1146,6 +1533,22 @@ $auto_url = $protocol . '://' . $host;
                     <label>Website-URL:</label>
                     <input type="url" name="new_url" value="<?php echo h($auto_url); ?>" required>
                     <div class="help-text">Ohne abschließenden Slash</div>
+                </div>
+
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" name="enable_debug" value="1">
+                        Debug-Modus aktivieren (WP_DEBUG in wp-config.php)
+                    </label>
+                    <div class="help-text">Empfohlen zur Fehlerdiagnose. Logs werden in wp-content/debug.log geschrieben.</div>
+                </div>
+
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" name="deactivate_plugins" value="1">
+                        Alle Plugins beim ersten Start deaktivieren
+                    </label>
+                    <div class="help-text">Hilfreich bei Plugin-Konflikten nach Restore. Standard: aus.</div>
                 </div>
 
                 <button type="submit" class="btn">Wiederherstellung starten →</button>

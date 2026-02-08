@@ -99,6 +99,7 @@ $GLOBALS['itn_activation_warnings'] = [];
 
 $itn_ready = true;
 $itn_ready = itn_safe_require(ITN_PLUGIN_DIR . 'includes/helpers.php', 'Hilfsfunktionen') && $itn_ready;
+$itn_ready = itn_safe_require(ITN_PLUGIN_DIR . 'includes/class-itn-encryption.php', 'Encryption') && $itn_ready;
 $itn_ready = itn_safe_require(ITN_PLUGIN_DIR . 'includes/class-itn-backup.php', 'Backup') && $itn_ready;
 $itn_ready = itn_safe_require(ITN_PLUGIN_DIR . 'includes/class-itn-chunked-backup.php', 'Chunked Backup') && $itn_ready;
 $itn_ready = itn_safe_require(ITN_PLUGIN_DIR . 'includes/class-itn-installer-generator.php', 'Installer-Generator') && $itn_ready;
