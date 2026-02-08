@@ -99,6 +99,7 @@ $GLOBALS['itn_activation_warnings'] = [];
 
 $itn_ready = true;
 $itn_ready = itn_safe_require(ITN_PLUGIN_DIR . 'includes/helpers.php', 'Hilfsfunktionen') && $itn_ready;
+$itn_ready = itn_safe_require(ITN_PLUGIN_DIR . 'includes/class-itn-encryption.php', 'Encryption') && $itn_ready;
 $itn_ready = itn_safe_require(ITN_PLUGIN_DIR . 'includes/class-itn-backup.php', 'Backup') && $itn_ready;
 $itn_ready = itn_safe_require(ITN_PLUGIN_DIR . 'includes/class-itn-chunked-backup.php', 'Chunked Backup') && $itn_ready;
 $itn_ready = itn_safe_require(ITN_PLUGIN_DIR . 'includes/class-itn-installer-generator.php', 'Installer-Generator') && $itn_ready;
@@ -217,6 +218,7 @@ class ITNSicherungPlugin {
         if (ITN_PLUGIN_READY) {
             add_action('admin_post_itn_restore_backup', [$this, 'handle_restore_backup']);
             add_action('admin_post_itn_save_settings', [$this, 'handle_save_settings']);
+            add_action('admin_post_itn_test_cron', [$this, 'handle_test_cron']);
         }
     }
 
@@ -261,12 +263,44 @@ class ITNSicherungPlugin {
     }
 
     public function cron_run_backup() {
+        $start_time = time();
         error_log('ITN Cron: Starte geplantes Backup');
-        $opts = array_merge(itn_settings_defaults(), get_option('itn_settings', []));
-        $backup = new ITN_Backup($opts);
-        $result = $backup->run(null);
-        error_log('ITN Cron: Backup abgeschlossen - ' . ($result['success'] ? 'SUCCESS' : 'FAILED'));
-        if (class_exists('ITN_Schedule')) ITN_Schedule::maybe_schedule_next_monthly();
+        
+        try {
+            // Log cron start
+            update_option('itn_last_cron_run', $start_time, false);
+            update_option('itn_last_cron_status', 'running', false);
+            update_option('itn_last_cron_message', 'Backup wird ausgeführt...', false);
+            delete_option('itn_last_cron_error');
+            
+            $opts = array_merge(itn_settings_defaults(), get_option('itn_settings', []));
+            $backup = new ITN_Backup($opts);
+            $result = $backup->run(null);
+            
+            // Log result
+            $success = !empty($result['success']);
+            update_option('itn_last_cron_status', $success ? 'success' : 'failed', false);
+            update_option('itn_last_cron_message', $result['message'] ?? ($success ? 'Backup erfolgreich' : 'Backup fehlgeschlagen'), false);
+            
+            if (!$success && isset($result['message'])) {
+                update_option('itn_last_cron_error', $result['message'], false);
+            }
+            
+            error_log('ITN Cron: Backup abgeschlossen - ' . ($success ? 'SUCCESS' : 'FAILED'));
+            
+            if (class_exists('ITN_Schedule')) ITN_Schedule::maybe_schedule_next_monthly();
+            
+        } catch (Exception $e) {
+            error_log('ITN Cron ERROR: ' . $e->getMessage());
+            update_option('itn_last_cron_status', 'failed', false);
+            update_option('itn_last_cron_message', 'Exception: ' . $e->getMessage(), false);
+            update_option('itn_last_cron_error', $e->getMessage() . "\n" . $e->getTraceAsString(), false);
+        } catch (Throwable $t) {
+            error_log('ITN Cron FATAL: ' . $t->getMessage());
+            update_option('itn_last_cron_status', 'failed', false);
+            update_option('itn_last_cron_message', 'Fatal: ' . $t->getMessage(), false);
+            update_option('itn_last_cron_error', $t->getMessage() . "\n" . $t->getTraceAsString(), false);
+        }
     }
     
     public function cron_run_backup_with_id($run_id = null) {
@@ -749,6 +783,19 @@ class ITNSicherungPlugin {
         exit;
     }
 
+    public function handle_test_cron() {
+        if (!current_user_can('manage_options')) wp_die(__('Keine Berechtigung.', 'itn-sicherung'));
+        check_admin_referer('itn_test_cron');
+        
+        // Manually trigger the cron
+        $this->cron_run_backup();
+        
+        // Redirect back to system info tab
+        $notice = ['itn_notice' => 'ok', 'itn_msg' => urlencode('Cron-Test wurde ausgeführt. Prüfen Sie die Ergebnisse unten.')];
+        wp_redirect(add_query_arg(array_merge(['page' => 'itn-sicherung', 'tab' => 'systeminfo'], $notice), admin_url('admin.php')));
+        exit;
+    }
+
     public function handle_cloud_disconnect() {
         if (!current_user_can('manage_options')) wp_die(__('Keine Berechtigung.', 'itn-sicherung'));
         check_admin_referer('itn_cloud_disconnect');
@@ -893,6 +940,9 @@ class ITNSicherungPlugin {
                 <a href="<?php echo esc_url(admin_url('admin.php?page=itn-sicherung&tab=settings')); ?>" class="nav-tab <?php echo $active_tab === 'settings' ? 'nav-tab-active' : ''; ?>">
                     <span class="dashicons dashicons-admin-settings"></span> <?php _e('Einstellungen', 'itn-sicherung'); ?>
                 </a>
+                <a href="<?php echo esc_url(admin_url('admin.php?page=itn-sicherung&tab=systeminfo')); ?>" class="nav-tab <?php echo $active_tab === 'systeminfo' ? 'nav-tab-active' : ''; ?>">
+                    <span class="dashicons dashicons-info"></span> <?php _e('Systeminfos', 'itn-sicherung'); ?>
+                </a>
             </nav>
 
             <div class="itn-tab-content">
@@ -907,6 +957,9 @@ class ITNSicherungPlugin {
                         break;
                     case 'settings':
                         $tab_file = ITN_PLUGIN_DIR . 'includes/admin/tab-settings.php';
+                        break;
+                    case 'systeminfo':
+                        $tab_file = ITN_PLUGIN_DIR . 'includes/admin/tab-systeminfo.php';
                         break;
                     case 'dashboard':
                     default:

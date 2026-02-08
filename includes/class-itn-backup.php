@@ -108,6 +108,41 @@ class ITN_Backup {
         }
     }
 
+    /**
+     * Encrypt ZIP using streaming encryption (v2 format)
+     * Replaces original ZIP with encrypted container
+     */
+    protected function encrypt_zip_streaming($zip_path, $password) {
+        if (!class_exists('ITN_Encryption')) {
+            return ['success' => false, 'message' => 'ITN_Encryption class not available'];
+        }
+        
+        $enc_path = $zip_path . '.enc';
+        
+        $progress_cb = function($percent, $message) {
+            // Sub-progress for encryption
+            $this->progress(94 + ($percent / 100), $message);
+        };
+        
+        $result = ITN_Encryption::encrypt_file_streaming_v2(
+            $zip_path,
+            $enc_path,
+            $password,
+            ITN_Encryption::ITERATIONS_DEFAULT,
+            $progress_cb
+        );
+        
+        if ($result['success']) {
+            // Replace original ZIP with encrypted container
+            @unlink($zip_path);
+            @rename($enc_path, $zip_path);
+        } else {
+            @unlink($enc_path);
+        }
+        
+        return $result;
+    }
+
     public function run($run_id = null) {
         try {
             @ignore_user_abort(true);
@@ -295,12 +330,29 @@ class ITN_Backup {
             if ($this->zip_encrypt_enabled) {
                 $supports = method_exists($z, 'setEncryptionName') || method_exists($z, 'setEncryptionIndex');
                 if (!$supports) {
-                    $this->progress(94, 'Verschlüsselung via ZipArchive nicht verfügbar – versuche CLI');
-                    $re = $this->repack_zip_with_encryption($this->zip_path, $this->zip_password);
-                    if (!$re['success']) {
-                        $this->progress(95, 'Hinweis: ZIP unverschlüsselt (' . ($re['message'] ?? 'CLI nicht verfügbar') . ')');
+                    // For large files (>100MB), use streaming encryption v2
+                    if ($zip_size > 100 * 1024 * 1024 && class_exists('ITN_Encryption')) {
+                        $this->progress(94, 'Verschlüsselung via Streaming (v2)...');
+                        $enc_result = $this->encrypt_zip_streaming($this->zip_path, $this->zip_password);
+                        if (!$enc_result['success']) {
+                            $this->progress(95, 'Streaming-Verschlüsselung fehlgeschlagen, versuche CLI');
+                            $re = $this->repack_zip_with_encryption($this->zip_path, $this->zip_password);
+                            if (!$re['success']) {
+                                $this->progress(95, 'Hinweis: ZIP unverschlüsselt (' . ($re['message'] ?? 'CLI nicht verfügbar') . ')');
+                            } else {
+                                $this->progress(96, 'ZIP verschlüsselt (CLI) — ' . ($re['method'] ?? ''));
+                            }
+                        } else {
+                            $this->progress(96, 'ZIP verschlüsselt (Streaming v2) — ' . ITN_Helpers::format_bytes($enc_result['size']));
+                        }
                     } else {
-                        $this->progress(96, 'ZIP verschlüsselt (CLI) — ' . ($re['method'] ?? ''));
+                        $this->progress(94, 'Verschlüsselung via ZipArchive nicht verfügbar – versuche CLI');
+                        $re = $this->repack_zip_with_encryption($this->zip_path, $this->zip_password);
+                        if (!$re['success']) {
+                            $this->progress(95, 'Hinweis: ZIP unverschlüsselt (' . ($re['message'] ?? 'CLI nicht verfügbar') . ')');
+                        } else {
+                            $this->progress(96, 'ZIP verschlüsselt (CLI) — ' . ($re['method'] ?? ''));
+                        }
                     }
                 } else {
                     $this->progress(95, 'ZIP mit Passwort erstellt (ZipArchive)');
